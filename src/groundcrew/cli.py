@@ -127,6 +127,12 @@ def cmd_status(cfg: Config) -> int:
     for path_str in sorted(repos):
         _print_repo_row(path_str, repos[path_str], sessions, root, now)
 
+    registered = state.get("registered", [])
+    if isinstance(registered, list):
+        unmatched = sorted(str(p) for p in cfg.overrides if str(p) not in registered)
+        for path_str in unmatched:
+            print(f"⚠ config override for unregistered repo: {path_str}")
+
     unregistered = state.get("unregistered", [])
     if isinstance(unregistered, list) and unregistered:
         print()

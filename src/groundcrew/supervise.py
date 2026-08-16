@@ -1,11 +1,11 @@
 """Supervisor process management: spawn, adopt, liveness, termination.
 
-Each managed repo gets one `claude remote-control --spawn worktree` process.
-Children are spawned with start_new_session=True so they survive a daemon
-restart (systemd KillMode=process); on startup the daemon re-adopts them by
-scanning /proc for matching cmdline + cwd. Restarting a supervisor is safe by
-construction: the CLI reconnects the same cloud environment and sessions, and
-preserves dirty worktrees.
+Each managed repo gets one `claude remote-control` process launched with that
+repo's effective settings. Children are spawned with start_new_session=True so
+they survive a daemon restart (systemd KillMode=process); on startup the
+daemon re-adopts them by scanning /proc for matching cmdline + cwd. Restarting
+a supervisor is safe by construction: the CLI reconnects the same cloud
+environment and sessions, and preserves dirty worktrees.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import signal
 import subprocess
 import time
 from collections import deque
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,11 +26,28 @@ from groundcrew.config import (
     CRASH_LIMIT,
     CRASH_WINDOW_SECONDS,
     TERMINATE_TIMEOUT,
+    RepoSettings,
     claude_bin,
     state_dir,
 )
 
-RC_ARGS = ("remote-control", "--spawn", "worktree", "--permission-mode", "bypassPermissions")
+
+def rc_args(settings: RepoSettings) -> tuple[str, ...]:
+    """The remote-control argv for a repo's effective settings.
+
+    Defaults are emitted explicitly so a supervisor's command line is
+    self-describing: args-drift detection compares a live process's argv
+    against this, and an implicit default would read as drift forever.
+    """
+    return (
+        "remote-control",
+        "--spawn",
+        settings.spawn,
+        "--capacity",
+        str(settings.capacity),
+        "--permission-mode",
+        settings.permission_mode,
+    )
 
 
 @dataclass
@@ -38,6 +56,7 @@ class Supervisor:
     pid: int
     proc_start: str
     launched_version: str | None
+    launched_args: tuple[str, ...]  # argv after the binary; real cmdline for adoptees
     spawned_at: float
     handle: subprocess.Popen[bytes] | None = None  # None for adopted processes
 
@@ -53,12 +72,13 @@ def log_path(repo: Path) -> Path:
     return logs / (str(repo).strip("/").replace("/", "-") + ".log")
 
 
-def spawn(repo: Path, version: str | None) -> Supervisor:
+def spawn(repo: Path, version: str | None, settings: RepoSettings) -> Supervisor:
+    args = rc_args(settings)
     # Append: a respawn must not erase the previous run's output — that is
     # exactly the crash evidence a crash-loop alert sends you to read.
     with log_path(repo).open("ab") as log:
         handle = subprocess.Popen(
-            [str(claude_bin()), *RC_ARGS],
+            [str(claude_bin()), *args],
             cwd=repo,
             stdin=subprocess.DEVNULL,
             stdout=log,
@@ -73,52 +93,76 @@ def spawn(repo: Path, version: str | None) -> Supervisor:
         pid=handle.pid,
         proc_start=start,
         launched_version=version,
+        launched_args=args,
         spawned_at=time.time(),
         handle=handle,
     )
 
 
-def find_orphans(root: Path, repos: list[Path]) -> dict[Path, Supervisor]:
+@dataclass(frozen=True)
+class ProcRecord:
+    """What adoption needs to know about one live process."""
+
+    pid: int
+    argv: tuple[str, ...]
+    cwd: str
+    start: str | None  # None: the process died between listing and inspection
+
+
+def match_orphans(
+    procs: Iterable[ProcRecord], root: Path, repos: list[Path]
+) -> dict[Path, Supervisor]:
     """Re-adopt supervisors left running by a previous daemon instance.
 
-    Adopts any remote-control process whose cwd is a registered repo OR any git
-    repo under the projects root — the latter so a repo unregistered across a
-    daemon restart still gets retired instead of leaking forever. A hand-started
-    remote-control in a registered repo is deliberately adopted too: the daemon
-    converges it to the registry's declared flags at the next drift restart.
+    Adopts any remote-control process — regardless of spawn mode — whose cwd
+    is a registered repo OR any git repo under the projects root; the latter so
+    a repo unregistered across a daemon restart still gets retired instead of
+    leaking forever. A hand-started remote-control in a registered repo is
+    deliberately adopted too: args-drift converges it to the configured flags
+    at the next quiet window.
     """
     wanted = {str(r): r for r in repos}
     adopted: dict[Path, Supervisor] = {}
+    for proc in procs:
+        if "remote-control" not in proc.argv or proc.start is None:
+            continue
+        repo = wanted.get(proc.cwd)
+        if repo is None:
+            candidate = Path(proc.cwd)
+            if candidate.is_relative_to(root) and (candidate / ".git").exists():
+                repo = candidate
+        if repo is None or repo in adopted:
+            continue
+        adopted[repo] = Supervisor(
+            repo=repo,
+            pid=proc.pid,
+            proc_start=proc.start,
+            launched_version=None,  # resolved later from /proc/<pid>/exe or engine metadata
+            launched_args=proc.argv[1:],  # drop the binary path
+            spawned_at=time.time(),
+            handle=None,
+        )
+    return adopted
+
+
+def _proc_records() -> Iterator[ProcRecord]:
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
         try:
-            argv = (entry / "cmdline").read_bytes().split(b"\0")
+            # cmdline is NUL-terminated; without the rstrip a trailing "" lands
+            # in argv and every adopted supervisor false-positives as args-drift.
+            raw = (entry / "cmdline").read_bytes().decode(errors="replace")
+            argv = raw.rstrip("\0").split("\0")
             cwd = str((entry / "cwd").readlink())
         except OSError:
             continue
-        if b"remote-control" not in argv or b"worktree" not in argv:
-            continue
-        repo = wanted.get(cwd)
-        if repo is None:
-            candidate = Path(cwd)
-            if candidate.is_relative_to(root) and (candidate / ".git").exists():
-                repo = candidate
-        if repo is None or repo in adopted:
-            continue
-        start = proc_start(pid)
-        if start is None:
-            continue
-        adopted[repo] = Supervisor(
-            repo=repo,
-            pid=pid,
-            proc_start=start,
-            launched_version=None,  # resolved later from /proc/<pid>/exe or engine metadata
-            spawned_at=time.time(),
-            handle=None,
-        )
-    return adopted
+        yield ProcRecord(pid=pid, argv=tuple(argv), cwd=cwd, start=proc_start(pid))
+
+
+def find_orphans(root: Path, repos: list[Path]) -> dict[Path, Supervisor]:
+    return match_orphans(_proc_records(), root, repos)
 
 
 def terminate(sup: Supervisor, timeout: float = TERMINATE_TIMEOUT) -> bool:

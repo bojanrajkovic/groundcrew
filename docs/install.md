@@ -54,10 +54,14 @@ status 78 (`EX_CONFIG`) — the systemd unit marks that exit
 restart-preventing, so a typo halts the service instead of restart-looping
 it.
 
-The `[claude]`, `[notify]`, `[hooks].post_pull`, and per-repo
-`[repos."<path>"]` tables are validated and parsed but not yet acted on;
-supervisor launch settings, notifier commands, and the post-pull hook are
-being wired in behind this format.
+Supervisor launch settings live in `[claude]` — `spawn`
+(`"worktree"`/`"same-dir"`), `capacity`, `permission_mode` — with per-repo
+overrides in `[repos."<path>"]` tables (any `[claude]` key except `bin`,
+plus `post_pull`). Changing them takes effect through drift: restart the
+daemon and each affected supervisor converges once its sessions are quiet.
+The `[notify]` and `[hooks].post_pull` tables are validated but not yet
+acted on; notifier commands and the post-pull hook are being wired in
+behind this format.
 
 Environment variables override everything, mainly for tests:
 `GROUNDCREW_ROOT`, `GROUNDCREW_CONFIG_DIR`, `GROUNDCREW_REGISTRY`,

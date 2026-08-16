@@ -194,7 +194,7 @@ class Daemon:
             if spawned_this_pass >= MAX_SPAWNS_PER_PASS:
                 continue  # ramp: the rest spawn on the next pass, 30s from now
             try:
-                rt.supervisor = supervise.spawn(repo, self.binary_version)
+                rt.supervisor = supervise.spawn(repo, self.binary_version, self.cfg.for_repo(repo))
             except OSError:
                 log.exception("could not spawn supervisor for %s", repo)
                 continue
@@ -248,8 +248,17 @@ class Daemon:
             self.binary_version = version
 
     def pull_repo(self, repo: Path, rt: RepoRuntime, now: float) -> None:
-        pruned = ("parked", "dirty", "pull", "mise", "diverged")
+        pruned = ("parked", "dirty", "pull", "mise", "diverged", "deferred", "drift")
         rt.warnings = [w for w in rt.warnings if not w.startswith(pruned)]
+        if self.cfg.for_repo(repo).spawn == "same-dir":
+            live = claude_state.rc_sessions_for(repo, claude_state.live_sessions())
+            if live:
+                # All same-dir sessions share the repo's working tree, so a
+                # pull would race their edits; quiet is not enough here.
+                rt.warnings.append(
+                    f"deferred: pull skipped, {len(live)} live session(s) share the working tree"
+                )
+                return
         outcome = gitops.pull(repo)
         rt.last_pull_at = now
         rt.last_pull_kind = outcome.kind.value
@@ -315,27 +324,28 @@ class Daemon:
                 (s.version for s in claude_state.rc_sessions_for(repo, sessions) if s.version),
                 None,
             )
-        if sup.launched_version == self.binary_version:
+        reasons = []
+        if sup.launched_version != self.binary_version:
+            reasons.append(f"version {sup.launched_version} -> {self.binary_version}")
+        if sup.launched_args != supervise.rc_args(self.cfg.for_repo(repo)):
+            reasons.append("args")
+        if not reasons:
             return
+        reason = " + ".join(reasons)
         # Re-read sessions for the quiet gate: the tick-wide snapshot can be
         # many minutes old by now, and a session started since then must not be
         # mistaken for absence.
         repo_sessions = claude_state.rc_sessions_for(repo, claude_state.live_sessions())
         if not claude_state.all_quiet(repo_sessions, self.cfg.quiet_seconds, time.time()):
+            rt.warnings.append(f"drift ({reason}): restart deferred, session(s) active")
             log.info(
-                "%s drifted (%s -> %s) but %d session(s) active; deferring",
+                "%s drifted (%s) but %d session(s) active; deferring",
                 repo.name,
-                sup.launched_version,
-                self.binary_version,
+                reason,
                 len(repo_sessions),
             )
             return
-        log.info(
-            "stopping %s for version drift (%s -> %s); ramp respawns it",
-            repo.name,
-            sup.launched_version,
-            self.binary_version,
-        )
+        log.info("stopping %s for drift (%s); ramp respawns it", repo.name, reason)
         if not supervise.terminate(sup):
             log.error("could not stop supervisor pid=%d for %s", sup.pid, repo)
             return

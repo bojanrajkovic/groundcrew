@@ -34,7 +34,7 @@ had no transcript writes for 15 minutes.
 | Cadence | Work |
 |---|---|
 | 30 s | Reconcile: spawn missing supervisors, respawn dead ones (crash-loop breaker: 3 deaths in 10 min → 30 min backoff + Pushover), retire unregistered repos when quiet |
-| hourly | Per repo: freshness pull → `mise install` when the default branch moved → version-drift restart when all sessions are quiet |
+| hourly | Per repo: freshness pull → `mise install` when the default branch moved → drift restart when all sessions are quiet |
 | nightly 04:00 | `claude update` as a backstop for the native auto-updater |
 
 Spawns are rate-limited to a few per reconcile pass: registering many
@@ -43,6 +43,20 @@ supervisors exit. Cold starts, mass restarts, and fleet-wide drift updates all
 ramp through this gate. Supervisors always run the native installer's binary
 (`~/.local/bin/claude`), never a PATH/shim lookup — a repo's mise config may
 pin its own `claude`, which must not become the supervisor.
+
+**Drift** covers both the binary version and the launch arguments. Each
+supervisor's argv is derived from its repo's effective settings with defaults
+emitted explicitly, so a live process's command line always states its
+configuration; a supervisor differing from the desired (version, args) pair
+restarts once quiet, through the ramp. That makes "edit config, restart the
+daemon" the entire reconfiguration story — there is no hot reload, because a
+daemon restart is free (children survive and are re-adopted, hand-started
+supervisors included, whatever their spawn mode) and adopted supervisors with
+stale arguments converge as args-drift.
+
+Repos configured with `spawn = "same-dir"` run every session in the repo
+root, so freshness pulls are skipped whenever such a repo has any live
+session — quiet is not enough when the working tree is shared.
 
 Pull policy: on the default branch and clean → `git pull --ff-only`; parked on
 another branch → `git fetch origin main:main` (updates the ref, never touches
