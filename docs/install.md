@@ -30,11 +30,40 @@ the suppressed notification and carries on.
 
 ## Configuration
 
-Everything is environment-overridable, mainly for tests: `GROUNDCREW_ROOT`
-(projects root), `GROUNDCREW_REGISTRY`, `GROUNDCREW_STATE`,
-`GROUNDCREW_CLAUDE_HOME`, `GROUNDCREW_CLAUDE_JSON`.
-Tunables (quiet window, cadences, backoff, spawn ramp) are constants in
-`src/groundcrew/config.py`.
+Settings live in `~/.config/groundcrew/config.toml` (XDG-aware), which
+groundcrew never writes; the registry lives beside it as
+`~/.config/groundcrew/repos.toml`, maintained by `groundcrew add`/`remove`.
+No config file means the built-in defaults — every key below shows its
+default:
+
+```toml
+root = "~/Projects"          # where repos are discovered
+
+[timing]
+quiet_seconds = 900          # transcript-quiet window before restarts
+tick_seconds = 3600          # freshness pull cadence
+nightly_hour = 4             # local hour of the `claude update` backstop
+
+[hooks]
+post_pull_timeout = 600
+```
+
+Validation is strict: an unknown key, a wrong type, or a bad value anywhere
+fails the load with the exact key path named, and the daemon exits with
+status 78 (`EX_CONFIG`) — the systemd unit marks that exit
+restart-preventing, so a typo halts the service instead of restart-looping
+it.
+
+The `[claude]`, `[notify]`, `[hooks].post_pull`, and per-repo
+`[repos."<path>"]` tables are validated and parsed but not yet acted on;
+supervisor launch settings, notifier commands, and the post-pull hook are
+being wired in behind this format.
+
+Environment variables override everything, mainly for tests:
+`GROUNDCREW_ROOT`, `GROUNDCREW_CONFIG_DIR`, `GROUNDCREW_REGISTRY`,
+`GROUNDCREW_STATE`, `GROUNDCREW_CLAUDE_HOME`, `GROUNDCREW_CLAUDE_JSON`.
+Protective tunables (spawn ramp, crash breaker, backoff, alert thresholds)
+are deliberately constants, not config.
 
 ## macOS (launchd) — not yet supported, here is what it would take
 

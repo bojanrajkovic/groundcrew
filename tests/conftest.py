@@ -10,6 +10,7 @@ import pytest
 def sandbox(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Point every groundcrew path at a throwaway directory."""
     monkeypatch.setenv("GROUNDCREW_ROOT", str(tmp_path / "projects"))
+    monkeypatch.setenv("GROUNDCREW_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setenv("GROUNDCREW_REGISTRY", str(tmp_path / "repos.toml"))
     monkeypatch.setenv("GROUNDCREW_STATE", str(tmp_path / "state"))
     monkeypatch.setenv("GROUNDCREW_CLAUDE_HOME", str(tmp_path / "claude-home"))
