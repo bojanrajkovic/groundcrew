@@ -1,0 +1,25 @@
+[Unit]
+Description=groundcrew — Claude Code remote-control fleet daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/groundcrew daemon
+# The default systemd user PATH lacks ~/.local/bin and mise shims. Spawned
+# supervisors (and every session inside them) inherit this environment, so the
+# shims must be here for repo toolchains, git-lfs smudge filters, etc.
+Environment="PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+# Only the daemon itself is killed on stop/restart; the claude remote-control
+# children keep running and are re-adopted by the next daemon instance.
+KillMode=process
+Restart=on-failure
+RestartSec=10
+# The nightly `claude update` can block up to 600s; without this, a stop during
+# it would SIGKILL the daemon before its final state write.
+TimeoutStopSec=650
+# Optional: PUSHOVER_TOKEN / PUSHOVER_USER, SSH_AUTH_SOCK override, etc.
+EnvironmentFile=-%h/.config/groundcrew/env
+
+[Install]
+WantedBy=default.target

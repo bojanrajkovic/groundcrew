@@ -1,0 +1,51 @@
+[project]
+name = "groundcrew"
+version = "0.1.0"
+description = "Daemon that keeps Claude Code remote-control environments running across a fleet of local repositories"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+groundcrew = "groundcrew.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.7.19,<0.12"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.16",
+    "pytest>=8",
+    "ruff>=0.12",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",      # docstrings where they earn their place, not everywhere
+    "CPY",    # no copyright headers in a personal tool
+    "TC001", "TC002", "TC003", # runtime/type-checking import split adds noise, no value here
+    "COM812", # conflicts with the formatter
+    "TRY003", "EM101", "EM102", # plain exception messages are fine
+    "S603", "S607",  # subprocess without shell=True is the whole point
+    "S310",   # urlopen against a fixed https URL (Pushover)
+    "T201",   # print IS the CLI's output mechanism
+    "BLE001", # the daemon must survive any single repo's failure
+]
+
+[tool.ruff.lint.per-file-ignores]
+# INP001: pytest rootdir imports, not a package; ARG001: fixtures used for side effects
+"tests/*" = ["S101", "PLR2004", "SLF001", "INP001", "ARG001"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
