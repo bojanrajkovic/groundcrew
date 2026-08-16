@@ -101,26 +101,17 @@ Environment variables override everything, mainly for tests:
 Protective tunables (spawn ramp, crash breaker, backoff, alert thresholds)
 are deliberately constants, not config.
 
-## macOS (launchd) — not yet supported, here is what it would take
+## macOS (launchd)
 
-The daemon is currently **Linux-only**, and the blocker is not launchd — it is
-`/proc`. Three load-bearing mechanisms read it directly:
+Process inspection — orphan adoption, PID-reuse guarding, version
+detection — goes through `psutil` (the one runtime dependency), one code
+path on both platforms, so the daemon itself runs on macOS. Session
+PID-reuse is detected portably: a process created after the session's
+recorded `startedAt` must be a recycler, so groundcrew never has to decode
+the CLI's platform-specific `procStart` value.
 
-1. **Orphan adoption** (`supervise.find_orphans`) scans `/proc/*/cmdline` and
-   `/proc/*/cwd` to re-adopt supervisors across daemon restarts.
-2. **PID-reuse guarding** (`claude_state.proc_start`) reads the kernel start
-   time from `/proc/<pid>/stat` so a recycled PID is never mistaken for a
-   live supervisor or session.
-3. **Version detection** (`claude_state.process_version`) resolves
-   `/proc/<pid>/exe` to find which binary a process is actually running.
-
-macOS has no procfs; equivalents exist via `libproc`/`sysctl` (or the
-`psutil` package, which wraps them portably: `psutil.Process.cmdline()`,
-`.cwd()`, `.create_time()`, `.exe()`). Porting means swapping those three
-functions onto psutil and taking it as the one runtime dependency.
-
-With that done, the launchd mapping for a user LaunchAgent
-(`~/Library/LaunchAgents/com.example.groundcrew.plist`) would be:
+The launchd mapping for a user LaunchAgent
+(`~/Library/LaunchAgents/com.example.groundcrew.plist`):
 
 | systemd concept | launchd equivalent |
 |---|---|

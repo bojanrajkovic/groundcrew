@@ -20,9 +20,9 @@ RC_ARGV = (
 
 
 def rec(
-    pid: int, cwd: Path, argv: tuple[str, ...] = RC_ARGV, start: str | None = "12345"
+    pid: int, cwd: Path, argv: tuple[str, ...] = RC_ARGV, created: float | None = 12345.0
 ) -> ProcRecord:
-    return ProcRecord(pid=pid, argv=argv, cwd=str(cwd), start=start)
+    return ProcRecord(pid=pid, argv=argv, cwd=str(cwd), created=created)
 
 
 def test_rc_args_emits_defaults_explicitly() -> None:
@@ -118,6 +118,6 @@ def test_dead_process_skipped(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    adopted = match_orphans([rec(48, repo, start=None)], tmp_path, [repo])
+    adopted = match_orphans([rec(48, repo, created=None)], tmp_path, [repo])
 
     assert adopted == {}

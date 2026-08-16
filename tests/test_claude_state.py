@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -9,18 +10,16 @@ from groundcrew import claude_state
 from groundcrew.config import claude_home, claude_json_path
 
 
-def write_session(home: Path, pid: int, session_id: str, cwd: str, proc_start: str | None) -> None:
+def write_session(home: Path, pid: int, session_id: str, cwd: str, started_at_ms: int) -> None:
     sessions = home / "sessions"
     sessions.mkdir(parents=True, exist_ok=True)
     data: dict[str, object] = {
         "pid": pid,
         "sessionId": session_id,
         "cwd": cwd,
-        "startedAt": int(time.time() * 1000),
+        "startedAt": started_at_ms,
         "version": "2.1.233",
     }
-    if proc_start is not None:
-        data["procStart"] = proc_start
     (sessions / f"{pid}.json").write_text(json.dumps(data))
 
 
@@ -47,30 +46,34 @@ def test_seed_trust_preserves_other_content(sandbox: Path) -> None:
     assert claude_state.seed_trust([repo]) == []
 
 
-def test_live_sessions_skips_dead_and_reused_pids(sandbox: Path) -> None:
+def test_live_sessions_skips_dead_and_recycled_pids(sandbox: Path) -> None:
     home = claude_home()
-    own_pid = os.getpid()
-    own_start = claude_state.proc_start(own_pid)
-    assert own_start is not None
-    write_session(home, own_pid, "sess-live", "/repo", own_start)
-    write_session(home, 4194000, "sess-dead", "/repo", "1")  # beyond default pid_max
-    other = home / "sessions" / "reused.json"
-    other.write_text(
-        json.dumps(
-            {
-                "pid": own_pid,
-                "sessionId": "sess-reused",
-                "cwd": "/repo",
-                "startedAt": 0,
-                "procStart": "not-our-start",
-            }
+    child = subprocess.Popen(["sleep", "30"])
+    try:
+        now_ms = int(time.time() * 1000)
+        # legit: the engine existed before its startedAt was recorded
+        write_session(home, child.pid, "sess-live", "/repo", now_ms)
+        # dead: no process wears this PID (beyond default pid_max)
+        write_session(home, 4194000, "sess-dead", "/repo", now_ms)
+        # recycled: the recorded session started in 1970, long before this
+        # process was created — whoever wears the PID now is a different process
+        recycled = home / "sessions" / "recycled.json"
+        recycled.write_text(
+            json.dumps(
+                {"pid": child.pid, "sessionId": "sess-recycled", "cwd": "/repo", "startedAt": 1}
+            )
         )
-    )
 
-    sessions = claude_state.live_sessions()
+        sessions = claude_state.live_sessions()
+    finally:
+        child.kill()
+        child.wait()
 
     assert [s.session_id for s in sessions] == ["sess-live"]
     assert sessions[0].version == "2.1.233"
+
+    # once the child is dead, its session file no longer counts as live
+    assert claude_state.live_sessions() == []
 
 
 def test_rc_sessions_for_filters_cwd_and_entrypoint(sandbox: Path) -> None:
@@ -105,6 +108,8 @@ def test_quiet_detection_uses_transcript_mtime(sandbox: Path) -> None:
     assert claude_state.all_quiet([], quiet_seconds=900, now=now)  # no sessions = quiet
 
 
-def test_proc_start_for_own_and_missing_pid(sandbox: Path) -> None:
-    assert claude_state.proc_start(os.getpid()) is not None
-    assert claude_state.proc_start(4194000) is None
+def test_proc_create_time_for_own_and_missing_pid(sandbox: Path) -> None:
+    created = claude_state.proc_create_time(os.getpid())
+    assert created is not None
+    assert created <= time.time()
+    assert claude_state.proc_create_time(4194000) is None

@@ -3,7 +3,7 @@ name = "groundcrew"
 version = "0.1.0"
 description = "Daemon that keeps Claude Code remote-control environments running across a fleet of local repositories"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["psutil>=7"]
 
 [project.scripts]
 groundcrew = "groundcrew.cli:main"
@@ -17,6 +17,7 @@ dev = [
     "mypy>=1.16",
     "pytest>=8",
     "ruff>=0.12",
+    "types-psutil",
 ]
 
 [tool.ruff]
@@ -32,7 +33,6 @@ ignore = [
     "COM812", # conflicts with the formatter
     "TRY003", "EM101", "EM102", # plain exception messages are fine
     "S603", "S607",  # subprocess without shell=True is the whole point
-    "S310",   # urlopen against a fixed https URL (Pushover)
     "T201",   # print IS the CLI's output mechanism
     "BLE001", # the daemon must survive any single repo's failure
 ]
