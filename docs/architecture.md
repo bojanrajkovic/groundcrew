@@ -9,7 +9,7 @@ flowchart TD
     S1 --> E1["session engine<br/>(repo root)"]
     S1 --> E2["session engine<br/>(.claude/worktrees/bridge-cse-...)"]
     D -. "state.json" .-> ST["groundcrew status"]
-    D -. "failures / rollouts" .-> PO["Pushover"]
+    D -. "failures / rollouts" .-> NO["notifier command"]
 ```
 
 Each supervisor connects its repo to a cloud environment; sessions requested
@@ -33,8 +33,8 @@ had no transcript writes for 15 minutes.
 
 | Cadence | Work |
 |---|---|
-| 30 s | Reconcile: spawn missing supervisors, respawn dead ones (crash-loop breaker: 3 deaths in 10 min → 30 min backoff + Pushover), retire unregistered repos when quiet |
-| hourly | Per repo: freshness pull → `mise install` when the default branch moved → drift restart when all sessions are quiet |
+| 30 s | Reconcile: spawn missing supervisors, respawn dead ones (crash-loop breaker: 3 deaths in 10 min → 30 min backoff + a notification), retire unregistered repos when quiet |
+| hourly | Per repo: freshness pull → the post-pull hook when the default branch moved in-tree → drift restart when all sessions are quiet |
 | nightly 04:00 | `claude update` as a backstop for the native auto-updater |
 
 Spawns are rate-limited to a few per reconcile pass: registering many

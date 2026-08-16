@@ -32,6 +32,7 @@ GIT_TIMEOUT = 120
 POST_PULL_TIMEOUT = 600
 UPDATE_TIMEOUT = 600
 TERMINATE_TIMEOUT = 60
+NOTIFY_TIMEOUT = 30
 
 EX_CONFIG = 78  # sysexits.h; the systemd unit declares it restart-preventing
 
@@ -235,11 +236,6 @@ def claude_bin() -> Path:
         return native
     found = shutil.which("claude")
     return Path(found) if found else native
-
-
-def mise_bin() -> Path:
-    found = shutil.which("mise")
-    return Path(found) if found else Path.home() / ".local" / "bin" / "mise"
 
 
 def atomic_write(path: Path, content: str) -> None:

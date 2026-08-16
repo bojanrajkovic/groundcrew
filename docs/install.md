@@ -15,18 +15,51 @@ One-time host preparation:
 - `loginctl enable-linger <user>` so the unit runs without a login session
 - `mise settings set trusted_config_paths ~/Projects` so headless
   `mise install` never blocks on a trust prompt
-- optional `~/.config/groundcrew/env` (mode 0600) for Pushover and overrides:
+- optional `~/.config/groundcrew/env` (mode 0600) for secrets the notifier
+  needs and environment overrides:
 
 ```
-PUSHOVER_TOKEN=...
+PUSHOVER_TOKEN=...   # read by contrib/notify-pushover, not by groundcrew
 PUSHOVER_USER=...
 # SSH_AUTH_SOCK=/run/user/1000/... if ssh-agent auth is needed for pulls
 ```
 
-Pushover pings on: crash loops, three consecutive pull failures for a repo,
-`mise install` failures, `claude update` failures, and (the one success ping)
-a completed fleet-wide version rollout. Without credentials the daemon logs
-the suppressed notification and carries on.
+## Notifications
+
+groundcrew has no built-in alert providers (ADR 0001) — it runs the command
+you configure, passing the alert title and message both as the two appended
+arguments (`$1`, `$2`) and as `GROUNDCREW_TITLE` / `GROUNDCREW_MESSAGE` in
+the environment. The notifier inherits the daemon's environment, so secrets
+from the env file flow through. A failing or slow notifier (30 s timeout) is
+logged and never retried; with no command configured, alerts are logged as
+suppressed.
+
+```toml
+[notify]
+command = ["/path/to/notifier"]
+```
+
+`contrib/notify-pushover` is a four-line Pushover notifier: copy it onto
+your PATH (or point `command` at the file) and put `PUSHOVER_TOKEN` /
+`PUSHOVER_USER` in the env file. Alerts fire on: crash loops, three
+consecutive pull failures for a repo, post-pull hook failures, `claude
+update` failures, and (the one success ping) a completed fleet-wide version
+rollout.
+
+## The post-pull hook
+
+When a repo's default branch moves under an in-tree pull, groundcrew runs
+the configured `post_pull` command in the repo root — toolchain refresh for
+mise, pnpm, cargo, whatever fits. One command per scope; compose multi-step
+setups in a script or `sh -c`. Per-repo tables replace the global wholesale,
+and an explicit `post_pull = []` disables the hook for that repo. Parked
+repos never run it (their working tree didn't change). Failures warn in
+`status` and notify immediately.
+
+```toml
+[hooks]
+post_pull = ["mise", "install"]
+```
 
 ## Configuration
 
@@ -59,9 +92,8 @@ Supervisor launch settings live in `[claude]` — `spawn`
 overrides in `[repos."<path>"]` tables (any `[claude]` key except `bin`,
 plus `post_pull`). Changing them takes effect through drift: restart the
 daemon and each affected supervisor converges once its sessions are quiet.
-The `[notify]` and `[hooks].post_pull` tables are validated but not yet
-acted on; notifier commands and the post-pull hook are being wired in
-behind this format.
+Notifications and the post-pull hook are user commands — see their sections
+above.
 
 Environment variables override everything, mainly for tests:
 `GROUNDCREW_ROOT`, `GROUNDCREW_CONFIG_DIR`, `GROUNDCREW_REGISTRY`,
