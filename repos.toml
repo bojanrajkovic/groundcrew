@@ -1,0 +1,25 @@
+# Repositories managed by groundcrew.
+# Maintained by `groundcrew add` / `groundcrew remove`; hand-editing is fine too.
+repos = [
+    "/home/brajkovic/Projects/atc",
+    "/home/brajkovic/Projects/claude-plugin-manager",
+    "/home/brajkovic/Projects/coderinserepeat.com",
+    "/home/brajkovic/Projects/containerfile-ts",
+    "/home/brajkovic/Projects/esphome-fanout-builder",
+    "/home/brajkovic/Projects/groundcrew",
+    "/home/brajkovic/Projects/grounds",
+    "/home/brajkovic/Projects/hollandaise",
+    "/home/brajkovic/Projects/home.coderinserepeat.com",
+    "/home/brajkovic/Projects/loupe-app/ci-runner-image",
+    "/home/brajkovic/Projects/loupe-app/claude-marketplace",
+    "/home/brajkovic/Projects/loupe-app/design-system",
+    "/home/brajkovic/Projects/loupe-app/issue-backend",
+    "/home/brajkovic/Projects/loupe-app/loupe",
+    "/home/brajkovic/Projects/loupe-app/tf-aws",
+    "/home/brajkovic/Projects/loupe-app/tf-github",
+    "/home/brajkovic/Projects/loupe-app/website",
+    "/home/brajkovic/Projects/mcp-paprika",
+    "/home/brajkovic/Projects/runny",
+    "/home/brajkovic/Projects/setlist",
+    "/home/brajkovic/Projects/unquote",
+]
