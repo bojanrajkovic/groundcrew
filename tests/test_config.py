@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -176,6 +177,18 @@ def test_registry_defaults_into_config_dir(sandbox: Path, monkeypatch: pytest.Mo
     monkeypatch.delenv("GROUNDCREW_REGISTRY")
 
     assert config.registry_path() == sandbox / "config" / "repos.toml"
+
+
+def test_status_warns_on_override_for_unregistered_repo(
+    sandbox: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_config(sandbox, '[repos."/never/registered"]\ncapacity = 1\n')
+    state = {"updated_at": 0, "registered": [], "repos": {}, "unregistered": []}
+    (sandbox / "state").mkdir(exist_ok=True)
+    (sandbox / "state" / "state.json").write_text(json.dumps(state))
+
+    assert cli.cmd_status(config.load()) == 0
+    assert "override for unregistered repo: /never/registered" in capsys.readouterr().out
 
 
 def test_bad_config_exits_with_ex_config(

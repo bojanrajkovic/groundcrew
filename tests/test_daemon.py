@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -7,9 +8,111 @@ from pathlib import Path
 import pytest
 from conftest import make_repo
 
-from groundcrew import config
-from groundcrew.daemon import discover_unregistered, next_nightly
+from groundcrew import claude_state, config, gitops, supervise
+from groundcrew.daemon import Daemon, RepoRuntime, discover_unregistered, next_nightly
 from groundcrew.supervise import CrashTracker
+
+
+def live_supervisor(repo: Path, args: tuple[str, ...], version: str) -> supervise.Supervisor:
+    """A Supervisor wearing this test process's PID, so alive() is True."""
+    pid = os.getpid()
+    start = claude_state.proc_start(pid)
+    assert start is not None
+    return supervise.Supervisor(
+        repo=repo,
+        pid=pid,
+        proc_start=start,
+        launched_version=version,
+        launched_args=args,
+        spawned_at=0.0,
+    )
+
+
+def rc_session(repo: Path, started_at: float) -> claude_state.SessionInfo:
+    return claude_state.SessionInfo(
+        pid=os.getpid(),
+        session_id="test-session",
+        cwd=repo / "sub",
+        started_at=started_at,
+        version="1.0.0",
+        entrypoint="sdk-cli",
+    )
+
+
+def test_args_drift_restarts_quiet_supervisor(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    daemon = Daemon(config.load())
+    daemon.binary_version = "1.0.0"
+    repo = sandbox / "projects" / "repo"
+    repo.mkdir()
+    rt = RepoRuntime()
+    rt.supervisor = live_supervisor(repo, ("remote-control", "--old-shape"), "1.0.0")
+    killed: list[supervise.Supervisor] = []
+
+    def fake_terminate(sup: supervise.Supervisor) -> bool:
+        killed.append(sup)
+        return True
+
+    monkeypatch.setattr(supervise, "terminate", fake_terminate)
+
+    daemon.maybe_restart_for_drift(repo, rt, [])
+
+    assert killed
+    assert rt.supervisor is None
+
+
+def test_matching_version_and_args_do_not_restart(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config.load()
+    daemon = Daemon(cfg)
+    daemon.binary_version = "1.0.0"
+    repo = sandbox / "projects" / "repo"
+    repo.mkdir()
+    rt = RepoRuntime()
+    rt.supervisor = live_supervisor(repo, supervise.rc_args(cfg.for_repo(repo)), "1.0.0")
+    monkeypatch.setattr(supervise, "terminate", lambda _sup: pytest.fail("must not terminate"))
+
+    daemon.maybe_restart_for_drift(repo, rt, [])
+
+    assert rt.supervisor is not None
+
+
+def test_drift_deferred_while_sessions_active(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    daemon = Daemon(config.load())
+    daemon.binary_version = "1.0.0"
+    repo = sandbox / "projects" / "repo"
+    repo.mkdir()
+    rt = RepoRuntime()
+    rt.supervisor = live_supervisor(repo, ("remote-control", "--old-shape"), "1.0.0")
+    monkeypatch.setattr(claude_state, "live_sessions", lambda: [rc_session(repo, time.time())])
+    monkeypatch.setattr(supervise, "terminate", lambda _sup: pytest.fail("must not terminate"))
+
+    daemon.maybe_restart_for_drift(repo, rt, [])
+
+    assert rt.supervisor is not None
+    assert any(w.startswith("drift") for w in rt.warnings)
+
+
+def test_same_dir_repo_defers_pull_while_sessions_live(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = sandbox / "projects" / "repo"
+    repo.mkdir()
+    cfg_dir = sandbox / "config"
+    cfg_dir.mkdir(exist_ok=True)
+    (cfg_dir / "config.toml").write_text(f'[repos."{repo}"]\nspawn = "same-dir"\n')
+    daemon = Daemon(config.load())
+    rt = RepoRuntime()
+    monkeypatch.setattr(claude_state, "live_sessions", lambda: [rc_session(repo, time.time())])
+    monkeypatch.setattr(gitops, "pull", lambda _repo: pytest.fail("pull must be skipped"))
+
+    daemon.pull_repo(repo, rt, time.time())
+
+    assert any(w.startswith("deferred") for w in rt.warnings)
 
 
 def test_registry_round_trip(sandbox: Path) -> None:
