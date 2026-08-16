@@ -5,3 +5,6 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 dist/
+
+# The registry is user data; it lives in ~/.config/groundcrew/, not the repo.
+/repos.toml

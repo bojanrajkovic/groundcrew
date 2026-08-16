@@ -15,6 +15,9 @@ Environment="PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/b
 KillMode=process
 Restart=on-failure
 RestartSec=10
+# A broken config.toml exits EX_CONFIG (78): halt and wait for a human instead
+# of fighting Restart=on-failure every 10 seconds over the same typo.
+RestartPreventExitStatus=78
 # The nightly `claude update` can block up to 600s; without this, a stop during
 # it would SIGKILL the daemon before its final state write.
 TimeoutStopSec=650

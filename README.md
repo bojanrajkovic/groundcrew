@@ -15,8 +15,10 @@ groundcrew clean <repo>    # interactively delete spawned worktrees; shows dirty
 groundcrew daemon          # the long-running process (service entry point)
 ```
 
-The registry is `repos.toml` next to this README. New clones never join
-silently — `status` lists unregistered repos it finds under the projects root.
+The registry is `~/.config/groundcrew/repos.toml`, maintained by
+`add`/`remove`; settings live beside it in `config.toml` (see
+[Install](docs/install.md)). New clones never join silently — `status` lists
+unregistered repos it finds under the projects root.
 
 ## Documentation
 

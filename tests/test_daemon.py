@@ -25,13 +25,13 @@ def test_registry_round_trip(sandbox: Path) -> None:
 
 
 def test_discover_unregistered_skips_registered_and_nested(sandbox: Path) -> None:
-    root = config.projects_root()
+    root = config.load().root
     managed = make_repo(root / "managed")
     make_repo(root / "unmanaged")
     make_repo(root / "group" / "unmanaged-nested-group")
     make_repo(root / "managed" / "vendored")  # nested inside a managed repo
 
-    found = discover_unregistered([managed])
+    found = discover_unregistered([managed], root)
 
     names = [p.name for p in found]
     assert "unmanaged" in names
@@ -42,7 +42,7 @@ def test_discover_unregistered_skips_registered_and_nested(sandbox: Path) -> Non
 
 def test_next_nightly_lands_on_the_configured_hour() -> None:
     now = time.time()
-    run_at = next_nightly(now)
+    run_at = next_nightly(now, config.NIGHTLY_HOUR)
 
     assert run_at > now
     assert run_at - now <= 25 * 3600  # 25h: a fall-back DST day is that long
@@ -58,11 +58,11 @@ def test_next_nightly_across_dst_transitions(monkeypatch: pytest.MonkeyPatch) ->
         # Day before spring-forward (2026-03-08) and before fall-back (2026-11-01)
         for day in ("2026-03-07", "2026-10-31"):
             after = time.mktime(time.strptime(f"{day} 12:00", "%Y-%m-%d %H:%M"))
-            run_at = next_nightly(after)
+            run_at = next_nightly(after, config.NIGHTLY_HOUR)
             assert time.localtime(run_at).tm_hour == config.NIGHTLY_HOUR
             # and the recomputation from that run must land on the NEXT day,
             # never the same day twice
-            following = next_nightly(run_at)
+            following = next_nightly(run_at, config.NIGHTLY_HOUR)
             assert time.localtime(following).tm_yday != time.localtime(run_at).tm_yday
     finally:
         monkeypatch.undo()

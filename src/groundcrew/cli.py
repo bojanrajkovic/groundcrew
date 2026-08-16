@@ -9,7 +9,15 @@ import time
 from pathlib import Path
 
 from groundcrew import claude_state, gitops
-from groundcrew.config import load_registry, projects_root, save_registry, state_dir
+from groundcrew.config import (
+    EX_CONFIG,
+    Config,
+    ConfigError,
+    load,
+    load_registry,
+    save_registry,
+    state_dir,
+)
 from groundcrew.daemon import run_daemon
 
 
@@ -98,7 +106,7 @@ def _print_repo_row(
             )
 
 
-def cmd_status() -> int:
+def cmd_status(cfg: Config) -> int:
     state_path = state_dir() / "state.json"
     if not state_path.exists():
         print("no state file — is the daemon running? (systemctl --user status groundcrew)")
@@ -111,7 +119,7 @@ def cmd_status() -> int:
         print(f"last nightly update: {state['last_update_result']}")
 
     sessions = claude_state.live_sessions()
-    root = str(projects_root()) + "/"
+    root = str(cfg.root) + "/"
     repos: dict[str, dict[str, object]] = state.get("repos", {})
     header = f"{'REPO':<34} {'SUP':<10} {'VER':<10} {'SESS':<12} {'LAST PULL':<22}"
     print()
@@ -181,11 +189,17 @@ def main() -> int:
     p_clean.add_argument("repo")
     args = parser.parse_args()
 
+    try:
+        cfg = load()
+    except ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return EX_CONFIG
+
     if args.command == "daemon":
-        run_daemon()
+        run_daemon(cfg)
         return 0
     if args.command == "status":
-        return cmd_status()
+        return cmd_status(cfg)
     if args.command == "add":
         return cmd_add(args.paths)
     if args.command == "remove":

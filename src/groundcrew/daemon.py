@@ -31,18 +31,14 @@ from types import FrameType
 from groundcrew import claude_state, gitops, supervise
 from groundcrew.config import (
     MAX_SPAWNS_PER_PASS,
-    MISE_TIMEOUT,
-    NIGHTLY_HOUR,
     POLL_SECONDS,
     PULL_FAILURES_BEFORE_ALERT,
-    QUIET_SECONDS,
-    TICK_SECONDS,
     UPDATE_TIMEOUT,
+    Config,
     atomic_write,
     claude_bin,
     load_registry,
     mise_bin,
-    projects_root,
     state_dir,
 )
 
@@ -68,8 +64,8 @@ def notify(title: str, message: str) -> None:
         log.warning("pushover send failed: %s", exc)
 
 
-def next_nightly(after: float) -> float:
-    """Unix time of the next NIGHTLY_HOUR o'clock, local time, strictly after `after`.
+def next_nightly(after: float, hour: int) -> float:
+    """Unix time of the next `hour` o'clock, local time, strictly after `after`.
 
     mktime with tm_isdst=-1 resolves each candidate date's own UTC offset, so
     DST transitions neither shift the hour nor double-run the update.
@@ -77,18 +73,17 @@ def next_nightly(after: float) -> float:
     lt = time.localtime(after)
     for days_ahead in (0, 1):
         candidate = time.mktime(
-            (lt.tm_year, lt.tm_mon, lt.tm_mday + days_ahead, NIGHTLY_HOUR, 0, 0, 0, 0, -1)
+            (lt.tm_year, lt.tm_mon, lt.tm_mday + days_ahead, hour, 0, 0, 0, 0, -1)
         )
         if candidate > after:
             return candidate
     raise AssertionError("no nightly slot within two days")
 
 
-def discover_unregistered(registry: list[Path]) -> list[Path]:
+def discover_unregistered(registry: list[Path], root: Path) -> list[Path]:
     """Git repos at depth 1-2 under the projects root that nobody registered."""
     registered = set(registry)
     found: list[Path] = []
-    root = projects_root()
     candidates = [p for p in root.glob("*") if p.is_dir()] + [
         p for p in root.glob("*/*") if p.is_dir()
     ]
@@ -114,7 +109,8 @@ class RepoRuntime:
 
 
 class Daemon:
-    def __init__(self) -> None:
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
         self.runtimes: dict[Path, RepoRuntime] = {}
         self.stop = threading.Event()
         self.binary_version: str | None = None
@@ -127,7 +123,7 @@ class Daemon:
         signal.signal(signal.SIGTERM, self._on_signal)
         signal.signal(signal.SIGINT, self._on_signal)
         registry = load_registry()
-        for repo, sup in supervise.find_orphans(projects_root(), registry).items():
+        for repo, sup in supervise.find_orphans(self.cfg.root, registry).items():
             self.runtimes.setdefault(repo, RepoRuntime()).supervisor = sup
             log.info("adopted supervisor pid=%d for %s", sup.pid, repo)
         self.binary_version = claude_state.binary_version()
@@ -138,7 +134,7 @@ class Daemon:
             self.binary_version,
         )
         tick_due = 0.0  # first tick immediately
-        nightly_due = next_nightly(time.time())
+        nightly_due = next_nightly(time.time(), self.cfg.nightly_hour)
         while not self.stop.is_set():
             # One repo's (or one file's) bad day must never take the daemon down:
             # a crash here means Restart=on-failure wipes crash trackers,
@@ -152,10 +148,10 @@ class Daemon:
                 self.reconcile(registry, now)
                 if now >= tick_due:
                     self.tick(registry, now)
-                    tick_due = now + TICK_SECONDS
+                    tick_due = now + self.cfg.tick_seconds
                 if now >= nightly_due:
                     self.nightly()
-                    nightly_due = next_nightly(time.time())
+                    nightly_due = next_nightly(time.time(), self.cfg.nightly_hour)
                 self.write_state(registry)
             except Exception:
                 log.exception("daemon loop iteration failed; continuing")
@@ -219,7 +215,7 @@ class Daemon:
                 rt.supervisor = None
                 continue
             sessions = claude_state.rc_sessions_for(repo, claude_state.live_sessions())
-            if claude_state.all_quiet(sessions, QUIET_SECONDS, now):
+            if claude_state.all_quiet(sessions, self.cfg.quiet_seconds, now):
                 log.info("retiring supervisor for unregistered %s", repo)
                 supervise.terminate(sup)
                 rt.supervisor = None
@@ -292,7 +288,7 @@ class Daemon:
                 cwd=repo,
                 capture_output=True,
                 text=True,
-                timeout=MISE_TIMEOUT,
+                timeout=self.cfg.post_pull_timeout,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -325,7 +321,7 @@ class Daemon:
         # many minutes old by now, and a session started since then must not be
         # mistaken for absence.
         repo_sessions = claude_state.rc_sessions_for(repo, claude_state.live_sessions())
-        if not claude_state.all_quiet(repo_sessions, QUIET_SECONDS, time.time()):
+        if not claude_state.all_quiet(repo_sessions, self.cfg.quiet_seconds, time.time()):
             log.info(
                 "%s drifted (%s -> %s) but %d session(s) active; deferring",
                 repo.name,
@@ -406,12 +402,12 @@ class Daemon:
             "pending_rollout": self.pending_rollout,
             "last_update_result": self.last_update_result,
             "registered": [str(r) for r in registry],
-            "unregistered": [str(p) for p in discover_unregistered(registry)],
+            "unregistered": [str(p) for p in discover_unregistered(registry, self.cfg.root)],
             "repos": repos,
         }
         atomic_write(state_dir() / "state.json", json.dumps(state, indent=2))
 
 
-def run_daemon() -> None:
+def run_daemon(cfg: Config) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    Daemon().run()
+    Daemon(cfg).run()
