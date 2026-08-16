@@ -166,6 +166,26 @@ def all_quiet(sessions: list[SessionInfo], quiet_seconds: float, now: float) -> 
     return all(now - last_activity(s) >= quiet_seconds for s in sessions)
 
 
+def repo_sessions(repo: Path) -> list[SessionInfo]:
+    """The repo's remote-control engine sessions, from a fresh read."""
+    return rc_sessions_for(repo, live_sessions())
+
+
+def repo_quiet(repo: Path, quiet_seconds: float, now: float) -> bool:
+    """Is the repo quiet — every one of its engine sessions transcript-quiet?
+
+    Always reads fresh session state: quiet gates decide restarts and
+    retirements, and a stale snapshot could mistake a just-started session
+    for absence. A repo with no sessions is quiet.
+    """
+    return all_quiet(repo_sessions(repo), quiet_seconds, now)
+
+
+def quiet_minutes(sessions: list[SessionInfo], now: float) -> float:
+    """Minutes since the most recent transcript write across these sessions."""
+    return min((now - last_activity(s)) / 60 for s in sessions)
+
+
 def binary_version() -> str | None:
     try:
         result = subprocess.run(

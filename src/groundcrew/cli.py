@@ -85,7 +85,7 @@ def _print_repo_row(
         sup = "DOWN"
     repo_sessions = claude_state.rc_sessions_for(repo, sessions)
     if repo_sessions:
-        quiet_min = min((now - claude_state.last_activity(s)) / 60 for s in repo_sessions)
+        quiet_min = claude_state.quiet_minutes(repo_sessions, now)
         sess = f"{len(repo_sessions)} ({quiet_min:.0f}m quiet)"
     else:
         sess = "0"

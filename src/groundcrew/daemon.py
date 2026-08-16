@@ -223,8 +223,7 @@ class Daemon:
             if not sup.alive():
                 rt.supervisor = None
                 continue
-            sessions = claude_state.rc_sessions_for(repo, claude_state.live_sessions())
-            if claude_state.all_quiet(sessions, self.cfg.quiet_seconds, now):
+            if claude_state.repo_quiet(repo, self.cfg.quiet_seconds, now):
                 log.info("retiring supervisor for unregistered %s", repo)
                 supervise.terminate(sup)
                 rt.supervisor = None
@@ -260,7 +259,7 @@ class Daemon:
         pruned = ("parked", "dirty", "pull", "post_pull", "diverged", "deferred", "drift")
         rt.warnings = [w for w in rt.warnings if not w.startswith(pruned)]
         if self.cfg.for_repo(repo).spawn == "same-dir":
-            live = claude_state.rc_sessions_for(repo, claude_state.live_sessions())
+            live = claude_state.repo_sessions(repo)
             if live:
                 # All same-dir sessions share the repo's working tree, so a
                 # pull would race their edits; quiet is not enough here.
@@ -348,18 +347,9 @@ class Daemon:
         if not reasons:
             return
         reason = " + ".join(reasons)
-        # Re-read sessions for the quiet gate: the tick-wide snapshot can be
-        # many minutes old by now, and a session started since then must not be
-        # mistaken for absence.
-        repo_sessions = claude_state.rc_sessions_for(repo, claude_state.live_sessions())
-        if not claude_state.all_quiet(repo_sessions, self.cfg.quiet_seconds, time.time()):
+        if not claude_state.repo_quiet(repo, self.cfg.quiet_seconds, time.time()):
             rt.warnings.append(f"drift ({reason}): restart deferred, session(s) active")
-            log.info(
-                "%s drifted (%s) but %d session(s) active; deferring",
-                repo.name,
-                reason,
-                len(repo_sessions),
-            )
+            log.info("%s drifted (%s) but session(s) active; deferring", repo.name, reason)
             return
         log.info("stopping %s for drift (%s); ramp respawns it", repo.name, reason)
         if not supervise.terminate(sup):
