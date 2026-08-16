@@ -3,9 +3,10 @@
 Each managed repo gets one `claude remote-control` process launched with that
 repo's effective settings. Children are spawned with start_new_session=True so
 they survive a daemon restart (systemd KillMode=process); on startup the
-daemon re-adopts them by scanning /proc for matching cmdline + cwd. Restarting
-a supervisor is safe by construction: the CLI reconnects the same cloud
-environment and sessions, and preserves dirty worktrees.
+daemon re-adopts them by scanning the process table (psutil) for matching
+cmdline + cwd. Restarting a supervisor is safe by construction: the CLI
+reconnects the same cloud environment and sessions, and preserves dirty
+worktrees.
 """
 
 from __future__ import annotations
@@ -20,7 +21,9 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from groundcrew.claude_state import proc_start
+import psutil
+
+from groundcrew.claude_state import proc_create_time
 from groundcrew.config import (
     BACKOFF_SECONDS,
     CRASH_LIMIT,
@@ -54,7 +57,7 @@ def rc_args(settings: RepoSettings) -> tuple[str, ...]:
 class Supervisor:
     repo: Path
     pid: int
-    proc_start: str
+    created: float
     launched_version: str | None
     launched_args: tuple[str, ...]  # argv after the binary; real cmdline for adoptees
     spawned_at: float
@@ -63,7 +66,7 @@ class Supervisor:
     def alive(self) -> bool:
         if self.handle is not None:
             self.handle.poll()  # reap if it exited, so no zombies linger
-        return proc_start(self.pid) == self.proc_start
+        return proc_create_time(self.pid) == self.created
 
 
 def log_path(repo: Path) -> Path:
@@ -85,13 +88,13 @@ def spawn(repo: Path, version: str | None, settings: RepoSettings) -> Supervisor
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-    start = proc_start(handle.pid)
-    if start is None:  # died instantly; alive() will report it on the next pass
-        start = "gone"
+    created = proc_create_time(handle.pid)
+    if created is None:  # died instantly; alive() will report it on the next pass
+        created = -1.0
     return Supervisor(
         repo=repo,
         pid=handle.pid,
-        proc_start=start,
+        created=created,
         launched_version=version,
         launched_args=args,
         spawned_at=time.time(),
@@ -106,7 +109,7 @@ class ProcRecord:
     pid: int
     argv: tuple[str, ...]
     cwd: str
-    start: str | None  # None: the process died between listing and inspection
+    created: float | None  # None: the process died between listing and inspection
 
 
 def match_orphans(
@@ -124,7 +127,7 @@ def match_orphans(
     wanted = {str(r): r for r in repos}
     adopted: dict[Path, Supervisor] = {}
     for proc in procs:
-        if "remote-control" not in proc.argv or proc.start is None:
+        if "remote-control" not in proc.argv or proc.created is None:
             continue
         repo = wanted.get(proc.cwd)
         if repo is None:
@@ -136,8 +139,8 @@ def match_orphans(
         adopted[repo] = Supervisor(
             repo=repo,
             pid=proc.pid,
-            proc_start=proc.start,
-            launched_version=None,  # resolved later from /proc/<pid>/exe or engine metadata
+            created=proc.created,
+            launched_version=None,  # resolved later from the process exe or engine metadata
             launched_args=proc.argv[1:],  # drop the binary path
             spawned_at=time.time(),
             handle=None,
@@ -146,19 +149,19 @@ def match_orphans(
 
 
 def _proc_records() -> Iterator[ProcRecord]:
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
+    attrs = ["pid", "cmdline", "cwd", "create_time"]
+    for proc in psutil.process_iter(attrs):
+        info = proc.info
+        cmdline = info.get("cmdline") or []
+        cwd = info.get("cwd")
+        if not cmdline or not cwd:  # kernel threads, permission-denied, races
             continue
-        pid = int(entry.name)
-        try:
-            # cmdline is NUL-terminated; without the rstrip a trailing "" lands
-            # in argv and every adopted supervisor false-positives as args-drift.
-            raw = (entry / "cmdline").read_bytes().decode(errors="replace")
-            argv = raw.rstrip("\0").split("\0")
-            cwd = str((entry / "cwd").readlink())
-        except OSError:
-            continue
-        yield ProcRecord(pid=pid, argv=tuple(argv), cwd=cwd, start=proc_start(pid))
+        yield ProcRecord(
+            pid=info["pid"],
+            argv=tuple(cmdline),
+            cwd=cwd,
+            created=info.get("create_time"),
+        )
 
 
 def find_orphans(root: Path, repos: list[Path]) -> dict[Path, Supervisor]:

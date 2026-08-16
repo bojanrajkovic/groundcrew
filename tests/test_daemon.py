@@ -119,12 +119,12 @@ def test_post_pull_failure_warns_and_notifies(
 def live_supervisor(repo: Path, args: tuple[str, ...], version: str) -> supervise.Supervisor:
     """A Supervisor wearing this test process's PID, so alive() is True."""
     pid = os.getpid()
-    start = claude_state.proc_start(pid)
-    assert start is not None
+    created = claude_state.proc_create_time(pid)
+    assert created is not None
     return supervise.Supervisor(
         repo=repo,
         pid=pid,
-        proc_start=start,
+        created=created,
         launched_version=version,
         launched_args=args,
         spawned_at=0.0,

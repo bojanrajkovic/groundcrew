@@ -4,8 +4,13 @@ Facts this module leans on (verified against Claude Code 2.1.x):
 - `~/.claude.json` holds `projects.<abs-path>.hasTrustDialogAccepted`; remote-control
   refuses to start in an untrusted directory.
 - Each running session engine writes `~/.claude/sessions/<pid>.json` with its cwd,
-  sessionId, version, and a `procStart` value that disambiguates PID reuse. The file
-  is removed on clean shutdown but survives crashes, so liveness must be re-checked.
+  sessionId, version, and a `startedAt` epoch-milliseconds timestamp written just
+  after the engine starts. The file is removed on clean shutdown but survives
+  crashes, so liveness must be re-checked. PID reuse is detected by inequality:
+  the engine held its PID continuously from startedAt until death, so any process
+  now wearing that PID but created *after* startedAt is a recycler. (The file also
+  records `procStart`, but its format is the CLI's platform-specific implementation
+  detail — Linux jiffies today — so groundcrew never reads it.)
 - The engines' `status` field is not populated for remote-control sessions, so
   busy/idle is inferred from transcript mtime (quiet-for-N-minutes heuristic).
 - Transcripts live at `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`; we find
@@ -19,6 +24,8 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+import psutil
 
 from groundcrew.config import atomic_write, claude_bin, claude_home, claude_json_path
 
@@ -68,17 +75,16 @@ def seed_trust(repos: list[Path]) -> list[Path]:
     return changed
 
 
-def proc_start(pid: int) -> str | None:
-    """starttime field from /proc/<pid>/stat, or None if the process is gone."""
+def proc_create_time(pid: int) -> float | None:
+    """Kernel creation time of the process (epoch seconds), or None if it is gone.
+
+    Deterministic for a given process, so exact equality against a previously
+    recorded value is the PID-reuse-safe liveness check.
+    """
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
+        return psutil.Process(pid).create_time()
+    except psutil.Error:
         return None
-    # comm (field 2) may contain spaces/parens; fields resume after the last ')'.
-    # starttime is stat field 22 overall = index 19 of the fields after comm.
-    starttime_index = 19
-    rest = stat.rsplit(")", 1)[-1].split()
-    return rest[starttime_index] if len(rest) > starttime_index else None
 
 
 @dataclass(frozen=True)
@@ -107,13 +113,14 @@ def live_sessions() -> list[SessionInfo]:
         cwd = data.get("cwd")
         if not (isinstance(pid, int) and isinstance(session_id, str) and isinstance(cwd, str)):
             continue
-        live_start = proc_start(pid)
-        if live_start is None:
+        created = proc_create_time(pid)
+        if created is None:
             continue  # process gone; crash leftover
-        recorded_start = data.get("procStart")
-        if isinstance(recorded_start, str) and recorded_start != live_start:
-            continue  # PID reused by an unrelated process
         started_ms = data.get("startedAt")
+        if isinstance(started_ms, (int, float)) and created > started_ms / 1000:
+            # The engine existed before startedAt was written; a process created
+            # after it must have picked up the PID after the engine died.
+            continue
         version = data.get("version")
         entrypoint = data.get("entrypoint")
         out.append(
@@ -177,8 +184,8 @@ def binary_version() -> str | None:
 def process_version(pid: int) -> str | None:
     """Version a running process was launched with, from its versioned binary path."""
     try:
-        exe = Path(f"/proc/{pid}/exe").readlink()
-    except OSError:
+        exe = psutil.Process(pid).exe()
+    except psutil.Error:
         return None
-    match = re.search(r"/versions/(\d+\.\d+\.\d+)", str(exe))
+    match = re.search(r"/versions/(\d+\.\d+\.\d+)", exe)
     return match.group(1) if match else None

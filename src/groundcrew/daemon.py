@@ -10,7 +10,7 @@ Loop shape:
 - nightly at NIGHTLY_HOUR: `claude update` as a backstop for the auto-updater.
 
 The daemon exits without touching its children (systemd KillMode=process); a new
-instance re-adopts them from /proc.
+instance re-adopts them from the process table.
 """
 
 from __future__ import annotations
@@ -413,7 +413,7 @@ class Daemon:
             sup = rt.supervisor
             repos[str(repo)] = {
                 "pid": sup.pid if sup else None,
-                "proc_start": sup.proc_start if sup else None,
+                "created": sup.created if sup else None,
                 "version": sup.launched_version if sup else None,
                 "spawned_at": sup.spawned_at if sup else None,
                 "last_pull_at": rt.last_pull_at,

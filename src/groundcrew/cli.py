@@ -75,7 +75,7 @@ def _print_repo_row(
 ) -> None:
     repo = Path(path_str)
     pid = info.get("pid")
-    alive = isinstance(pid, int) and claude_state.proc_start(pid) == info.get("proc_start")
+    alive = isinstance(pid, int) and claude_state.proc_create_time(pid) == info.get("created")
     backoff_until = info.get("backoff_until")
     if alive:
         sup = f"up {pid}"
