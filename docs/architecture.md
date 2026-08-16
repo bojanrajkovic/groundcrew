@@ -66,8 +66,13 @@ default branch is classified as `diverged` — a warning for a human, not an
 infrastructure failure, so it never triggers the consecutive-failure alert.
 
 The daemon exits without touching its children (`KillMode=process`,
-`start_new_session`); the next daemon instance re-adopts them from `/proc` by
-cmdline + cwd, so groundcrew's own restarts never bounce the fleet.
+`start_new_session`); the next daemon instance re-adopts them from the
+process table by cmdline + cwd, so groundcrew's own restarts never bounce
+the fleet. All process inspection — adoption, liveness, version detection,
+session PID-reuse guarding — goes through psutil, one code path on Linux
+and macOS; PID reuse is detected by inequality (a process created after a
+session's recorded `startedAt` must be a recycler), never by decoding the
+CLI's platform-specific `procStart` value.
 
 ## Known limits
 

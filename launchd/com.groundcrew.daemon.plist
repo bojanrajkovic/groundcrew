@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.groundcrew.daemon</string>
+
+  <!-- Adjust the path: the wrapper sources the env file (secrets stay out of
+       this world-readable plist), fixes PATH, and converts the config-error
+       exit so KeepAlive stops instead of relaunch-looping a typo. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/CHANGEME/.config/groundcrew/groundcrew-wrapper.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- systemd Restart=on-failure: relaunch on any unsuccessful exit only. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <!-- systemd KillMode=process: supervisors survive daemon stop/restart and
+       are re-adopted by the next instance. -->
+  <key>AbandonProcessGroup</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/CHANGEME/Library/Logs/groundcrew.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/CHANGEME/Library/Logs/groundcrew.log</string>
+</dict>
+</plist>
