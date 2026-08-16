@@ -35,7 +35,6 @@ from groundcrew.config import (
     UPDATE_TIMEOUT,
     Config,
     atomic_write,
-    claude_bin,
     load_registry,
     state_dir,
 )
@@ -134,7 +133,7 @@ class Daemon:
         for repo, sup in supervise.find_orphans(self.cfg.root, registry).items():
             self.runtimes.setdefault(repo, RepoRuntime()).supervisor = sup
             log.info("adopted supervisor pid=%d for %s", sup.pid, repo)
-        self.binary_version = claude_state.binary_version()
+        self.binary_version = claude_state.binary_version(self.cfg.claude_bin)
         log.info(
             "groundcrew up: %d repos registered, %d supervisors adopted, claude %s",
             len(registry),
@@ -203,7 +202,9 @@ class Daemon:
             if spawned_this_pass >= MAX_SPAWNS_PER_PASS:
                 continue  # ramp: the rest spawn on the next pass, 30s from now
             try:
-                rt.supervisor = supervise.spawn(repo, self.binary_version, self.cfg.for_repo(repo))
+                rt.supervisor = supervise.spawn(
+                    repo, self.binary_version, self.cfg.for_repo(repo), self.cfg.claude_bin
+                )
             except OSError:
                 log.exception("could not spawn supervisor for %s", repo)
                 continue
@@ -248,7 +249,7 @@ class Daemon:
         self.check_rollout_complete()
 
     def refresh_binary_version(self) -> None:
-        version = claude_state.binary_version()
+        version = claude_state.binary_version(self.cfg.claude_bin)
         if version and version != self.binary_version:
             log.info("claude binary now %s (was %s)", version, self.binary_version)
             if self.binary_version is not None:
@@ -377,7 +378,7 @@ class Daemon:
         log.info("nightly claude update")
         try:
             result = subprocess.run(
-                [str(claude_bin()), "update"],
+                [str(self.cfg.claude_bin), "update"],
                 capture_output=True,
                 text=True,
                 timeout=UPDATE_TIMEOUT,

@@ -74,6 +74,12 @@ def test_full_file_parses_and_materializes_overrides(sandbox: Path) -> None:
     assert cfg.for_repo(Path("/somewhere/else")) is cfg.defaults
 
 
+def test_claude_bin_key_feeds_the_config(sandbox: Path) -> None:
+    write_config(sandbox, '[claude]\nbin = "/opt/homebrew/bin/claude"\n')
+
+    assert config.load().claude_bin == Path("/opt/homebrew/bin/claude")
+
+
 def test_env_root_beats_file_root(sandbox: Path) -> None:
     write_config(sandbox, 'root = "/from/the/file"\n')
 

@@ -137,6 +137,15 @@ def test_repo_quiet_composes_fresh_session_state(sandbox: Path) -> None:
         child.wait()
 
 
+def test_binary_version_probes_the_given_binary(sandbox: Path) -> None:
+    fake = sandbox / "fake-claude"
+    fake.write_text('#!/bin/sh\necho "9.9.9 (Claude Code)"\n')
+    fake.chmod(0o755)
+
+    assert claude_state.binary_version(fake) == "9.9.9"
+    assert claude_state.binary_version(sandbox / "missing") is None
+
+
 def test_proc_create_time_for_own_and_missing_pid(sandbox: Path) -> None:
     created = claude_state.proc_create_time(os.getpid())
     assert created is not None

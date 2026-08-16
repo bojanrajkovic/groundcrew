@@ -30,7 +30,6 @@ from groundcrew.config import (
     CRASH_WINDOW_SECONDS,
     TERMINATE_TIMEOUT,
     RepoSettings,
-    claude_bin,
     state_dir,
 )
 
@@ -75,13 +74,13 @@ def log_path(repo: Path) -> Path:
     return logs / (str(repo).strip("/").replace("/", "-") + ".log")
 
 
-def spawn(repo: Path, version: str | None, settings: RepoSettings) -> Supervisor:
+def spawn(repo: Path, version: str | None, settings: RepoSettings, binary: Path) -> Supervisor:
     args = rc_args(settings)
     # Append: a respawn must not erase the previous run's output — that is
     # exactly the crash evidence a crash-loop alert sends you to read.
     with log_path(repo).open("ab") as log:
         handle = subprocess.Popen(
-            [str(claude_bin()), *args],
+            [str(binary), *args],
             cwd=repo,
             stdin=subprocess.DEVNULL,
             stdout=log,

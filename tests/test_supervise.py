@@ -107,6 +107,21 @@ def test_first_process_per_repo_wins(tmp_path: Path) -> None:
     assert adopted[repo].pid == 46
 
 
+def test_spawn_launches_the_given_binary(sandbox: Path) -> None:
+    repo = sandbox / "projects" / "repo"
+    repo.mkdir()
+    marker = sandbox / "launched"
+    fake = sandbox / "fake-claude"
+    fake.write_text(f'#!/bin/sh\necho "$@" > {marker}\n')
+    fake.chmod(0o755)
+
+    sup = supervise.spawn(repo, "1.0.0", RepoSettings(), binary=fake)
+    assert sup.handle is not None
+    sup.handle.wait(timeout=10)
+
+    assert "--capacity 32" in marker.read_text()
+
+
 def test_proc_reader_strips_cmdline_nul_terminator() -> None:
     me = next(r for r in supervise._proc_records() if r.pid == os.getpid())
 

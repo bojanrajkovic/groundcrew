@@ -27,7 +27,7 @@ from pathlib import Path
 
 import psutil
 
-from groundcrew.config import atomic_write, claude_bin, claude_home, claude_json_path
+from groundcrew.config import atomic_write, claude_home, claude_json_path
 
 _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
 
@@ -186,10 +186,10 @@ def quiet_minutes(sessions: list[SessionInfo], now: float) -> float:
     return min((now - last_activity(s)) / 60 for s in sessions)
 
 
-def binary_version() -> str | None:
+def binary_version(binary: Path) -> str | None:
     try:
         result = subprocess.run(
-            [str(claude_bin()), "--version"],
+            [str(binary), "--version"],
             capture_output=True,
             text=True,
             timeout=30,
