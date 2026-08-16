@@ -4,9 +4,9 @@ Loop shape:
 - every POLL_SECONDS: reconcile supervisors against the registry (spawn missing,
   respawn dead with crash-loop backoff, retire unregistered when quiet), then
   persist a state snapshot for `groundcrew status`.
-- every TICK_SECONDS: per repo — freshness pull, `mise install` when the default
-  branch moved, and a version-drift restart once every session in the repo has
-  been transcript-quiet for QUIET_SECONDS.
+- every TICK_SECONDS: per repo — freshness pull, the post-pull hook when the
+  default branch moved in-tree, and a drift restart once every session in the
+  repo has been transcript-quiet for QUIET_SECONDS.
 - nightly at NIGHTLY_HOUR: `claude update` as a backstop for the auto-updater.
 
 The daemon exits without touching its children (systemd KillMode=process); a new
@@ -22,8 +22,6 @@ import signal
 import subprocess
 import threading
 import time
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType
@@ -31,6 +29,7 @@ from types import FrameType
 from groundcrew import claude_state, gitops, supervise
 from groundcrew.config import (
     MAX_SPAWNS_PER_PASS,
+    NOTIFY_TIMEOUT,
     POLL_SECONDS,
     PULL_FAILURES_BEFORE_ALERT,
     UPDATE_TIMEOUT,
@@ -38,30 +37,39 @@ from groundcrew.config import (
     atomic_write,
     claude_bin,
     load_registry,
-    mise_bin,
     state_dir,
 )
 
 log = logging.getLogger("groundcrew")
 
 
-def notify(title: str, message: str) -> None:
-    """Pushover ping; silently a no-op when credentials are not configured."""
-    token = os.environ.get("PUSHOVER_TOKEN")
-    user = os.environ.get("PUSHOVER_USER")
-    if not token or not user:
-        log.info("pushover not configured; suppressed: %s — %s", title, message)
+def notify(
+    command: tuple[str, ...], title: str, message: str, timeout: float = NOTIFY_TIMEOUT
+) -> None:
+    """Run the configured notifier command; log-and-continue on any failure.
+
+    The contract (ADR 0001): title and message arrive both as the two appended
+    argv entries and as GROUNDCREW_TITLE / GROUNDCREW_MESSAGE in the
+    environment, so one-line shell notifiers stay one line and future fields
+    can be added without breaking anyone. Never retried, never fatal.
+    """
+    if not command:
+        log.info("no notifier configured; suppressed: %s — %s", title, message)
         return
-    data = urllib.parse.urlencode(
-        {"token": token, "user": user, "title": title, "message": message}
-    ).encode()
     try:
-        with urllib.request.urlopen(
-            "https://api.pushover.net/1/messages.json", data=data, timeout=15
-        ):
-            pass
-    except OSError as exc:
-        log.warning("pushover send failed: %s", exc)
+        subprocess.run(
+            [*command, title, message],
+            env={**os.environ, "GROUNDCREW_TITLE": title, "GROUNDCREW_MESSAGE": message},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        stderr = getattr(exc, "stderr", None)
+        detail = stderr.decode(errors="replace") if isinstance(stderr, bytes) else (stderr or "")
+        log.warning("notifier failed: %s · %s", exc, gitops.summarize(detail))
 
 
 def next_nightly(after: float, hour: int) -> float:
@@ -183,6 +191,7 @@ class Daemon:
                 if rt.crashes.record(now):
                     log.error("crash loop for %s; backing off", repo)
                     notify(
+                        self.cfg.notify_command,
                         "groundcrew: crash loop",
                         f"{repo.name} supervisor crash-looping; backing off",
                     )
@@ -248,7 +257,7 @@ class Daemon:
             self.binary_version = version
 
     def pull_repo(self, repo: Path, rt: RepoRuntime, now: float) -> None:
-        pruned = ("parked", "dirty", "pull", "mise", "diverged", "deferred", "drift")
+        pruned = ("parked", "dirty", "pull", "post_pull", "diverged", "deferred", "drift")
         rt.warnings = [w for w in rt.warnings if not w.startswith(pruned)]
         if self.cfg.for_repo(repo).spawn == "same-dir":
             live = claude_state.rc_sessions_for(repo, claude_state.live_sessions())
@@ -280,20 +289,27 @@ class Daemon:
             )
             if rt.pull_failures >= PULL_FAILURES_BEFORE_ALERT and not rt.pull_alerted:
                 rt.pull_alerted = True
-                notify("groundcrew: pull failing", f"{repo.name}: {outcome.detail}")
+                notify(
+                    self.cfg.notify_command,
+                    "groundcrew: pull failing",
+                    f"{repo.name}: {outcome.detail}",
+                )
             return
         rt.pull_failures = 0
         rt.pull_alerted = False
-        if outcome.moved:
+        if outcome.moved and not outcome.parked:
+            # Parked repos get ref-only updates; the working tree didn't change,
+            # so refreshing its toolchain would act on a tree the pull never touched.
             log.info("%s: %s (default branch moved)", repo.name, outcome.kind.value)
-            self.mise_install(repo, rt)
+            self.run_post_pull(repo, rt)
 
-    def mise_install(self, repo: Path, rt: RepoRuntime) -> None:
-        if gitops.mise_config(repo) is None:
+    def run_post_pull(self, repo: Path, rt: RepoRuntime) -> None:
+        command = self.cfg.for_repo(repo).post_pull
+        if not command:
             return
         try:
             result = subprocess.run(
-                [str(mise_bin()), "install"],
+                command,
                 cwd=repo,
                 capture_output=True,
                 text=True,
@@ -305,10 +321,10 @@ class Daemon:
             detail = str(exc)
         if result is not None and result.returncode == 0:
             return
-        detail = detail if result is None else (result.stderr.strip()[-300:] or "non-zero exit")
-        rt.warnings.append(f"mise install failed: {detail}")
-        log.warning("mise install failed for %s: %s", repo, detail)
-        notify("groundcrew: mise install failed", f"{repo.name}: {detail}")
+        detail = detail if result is None else (gitops.summarize(result.stderr) or "non-zero exit")
+        rt.warnings.append(f"post_pull failed: {detail}")
+        log.warning("post_pull failed for %s: %s", repo, detail)
+        notify(self.cfg.notify_command, "groundcrew: post_pull failed", f"{repo.name}: {detail}")
 
     def maybe_restart_for_drift(
         self,
@@ -359,6 +375,7 @@ class Daemon:
         fleet = [rt.supervisor for rt in self.runtimes.values() if rt.supervisor is not None]
         if fleet and all(s.launched_version == self.pending_rollout for s in fleet):
             notify(
+                self.cfg.notify_command,
                 "groundcrew: fleet updated",
                 f"all {len(fleet)} supervisors now on claude {self.pending_rollout}",
             )
@@ -378,12 +395,12 @@ class Daemon:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             self.last_update_result = f"failed: {exc}"
-            notify("groundcrew: claude update failed", str(exc))
+            notify(self.cfg.notify_command, "groundcrew: claude update failed", str(exc))
             return
         tail = (result.stdout + result.stderr).strip()[-300:]
         self.last_update_result = f"exit {result.returncode}: {tail}"
         if result.returncode != 0:
-            notify("groundcrew: claude update failed", tail)
+            notify(self.cfg.notify_command, "groundcrew: claude update failed", tail)
         self.refresh_binary_version()
 
     # -- state snapshot ----------------------------------------------------

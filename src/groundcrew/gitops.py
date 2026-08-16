@@ -99,8 +99,8 @@ class PullOutcome:
 _DIVERGENCE_MARKERS = ("fast-forward", "refusing to fetch into branch")
 
 
-def _summarize(text: str, limit: int = 300) -> str:
-    """One line of the interesting part of git stderr: fatal/error lines first."""
+def summarize(text: str, limit: int = 300) -> str:
+    """One line of the interesting part of command stderr: fatal/error lines first."""
     lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
     important = [line for line in lines if any(m in line for m in ("fatal:", "error:", "rejected"))]
     return " · ".join(important or lines)[:limit]
@@ -136,20 +136,12 @@ def pull(repo: Path) -> PullOutcome:
     if result.returncode == 0:
         kind, detail = ok_kind, ok_detail
     elif any(m in result.stderr for m in _DIVERGENCE_MARKERS):
-        kind, detail = PullKind.DIVERGED, _summarize(result.stderr)
+        kind, detail = PullKind.DIVERGED, summarize(result.stderr)
     else:
-        kind, detail = PullKind.FAILED, _summarize(result.stderr)
+        kind, detail = PullKind.FAILED, summarize(result.stderr)
 
     after = branch_tip(repo, branch)
     return PullOutcome(kind, detail, moved=before != after, parked=parked)
-
-
-def mise_config(repo: Path) -> Path | None:
-    for name in ("mise.toml", ".mise.toml"):
-        candidate = repo / name
-        if candidate.exists():
-            return candidate
-    return None
 
 
 @dataclass(frozen=True)

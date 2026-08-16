@@ -6,11 +6,114 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from conftest import make_repo
+from conftest import add_origin_commit, clone, git, make_repo
 
 from groundcrew import claude_state, config, gitops, supervise
-from groundcrew.daemon import Daemon, RepoRuntime, discover_unregistered, next_nightly
+from groundcrew import daemon as daemon_mod
+from groundcrew.daemon import Daemon, RepoRuntime, discover_unregistered, next_nightly, notify
 from groundcrew.supervise import CrashTracker
+
+
+def script(path: Path, body: str) -> Path:
+    path.write_text(f"#!/bin/sh\n{body}\n")
+    path.chmod(0o755)
+    return path
+
+
+def test_notify_passes_title_and_message_as_argv_and_env(sandbox: Path) -> None:
+    out = sandbox / "out.txt"
+    notifier = script(
+        sandbox / "notifier", f'echo "$1|$2|$GROUNDCREW_TITLE|$GROUNDCREW_MESSAGE" > {out}'
+    )
+
+    notify((str(notifier),), "Title", "Body text")
+
+    assert out.read_text().strip() == "Title|Body text|Title|Body text"
+
+
+def test_notify_nonzero_exit_logged_not_raised(
+    sandbox: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    notifier = script(sandbox / "notifier", "echo doom >&2\nexit 3")
+
+    notify((str(notifier),), "T", "M")
+
+    assert "notifier failed" in caplog.text
+    assert "doom" in caplog.text
+
+
+def test_notify_timeout_logged_not_raised(sandbox: Path, caplog: pytest.LogCaptureFixture) -> None:
+    notifier = script(sandbox / "notifier", "sleep 5")
+
+    notify((str(notifier),), "T", "M", timeout=0.2)
+
+    assert "notifier failed" in caplog.text
+
+
+def test_notify_unconfigured_suppressed(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("INFO", logger="groundcrew"):
+        notify((), "T", "M")
+
+    assert "suppressed" in caplog.text
+
+
+def hook_fixture(sandbox: Path, hook_body: str, extra_config: str = "") -> tuple[Path, Path]:
+    """An origin+clone pair with a fresh origin commit and a configured hook."""
+    root = sandbox / "projects"
+    origin = make_repo(root / "origin")
+    repo = clone(origin, root / "repo")
+    add_origin_commit(origin)
+    hook = script(sandbox / "hook", hook_body)
+    cfg_dir = sandbox / "config"
+    cfg_dir.mkdir(exist_ok=True)
+    (cfg_dir / "config.toml").write_text(f'[hooks]\npost_pull = ["{hook}"]\n{extra_config}')
+    return repo, sandbox / "hook-ran"
+
+
+def test_post_pull_runs_in_repo_after_branch_move(sandbox: Path) -> None:
+    repo, marker = hook_fixture(sandbox, f"pwd > {sandbox / 'hook-ran'}")
+
+    Daemon(config.load()).pull_repo(repo, RepoRuntime(), time.time())
+
+    assert marker.read_text().strip() == str(repo)
+
+
+def test_post_pull_skipped_for_parked_repo(sandbox: Path) -> None:
+    repo, marker = hook_fixture(sandbox, f"pwd > {sandbox / 'hook-ran'}")
+    git(repo, "checkout", "-q", "-b", "parked-branch")
+    rt = RepoRuntime()
+
+    Daemon(config.load()).pull_repo(repo, rt, time.time())
+
+    assert not marker.exists()
+    assert any(w.startswith("parked") for w in rt.warnings)
+
+
+def test_post_pull_empty_override_disables(sandbox: Path) -> None:
+    repo, marker = hook_fixture(sandbox, f"pwd > {sandbox / 'hook-ran'}")
+    cfg_path = sandbox / "config" / "config.toml"
+    cfg_path.write_text(cfg_path.read_text() + f'\n[repos."{repo}"]\npost_pull = []\n')
+
+    Daemon(config.load()).pull_repo(repo, RepoRuntime(), time.time())
+
+    assert not marker.exists()
+
+
+def test_post_pull_failure_warns_and_notifies(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, _ = hook_fixture(sandbox, "echo kaboom >&2\nexit 1")
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        daemon_mod, "notify", lambda _cmd, title, message, **_kw: sent.append((title, message))
+    )
+    rt = RepoRuntime()
+
+    Daemon(config.load()).pull_repo(repo, rt, time.time())
+
+    assert any(w.startswith("post_pull failed") for w in rt.warnings)
+    assert sent
+    assert "kaboom" in sent[0][1]
 
 
 def live_supervisor(repo: Path, args: tuple[str, ...], version: str) -> supervise.Supervisor:
