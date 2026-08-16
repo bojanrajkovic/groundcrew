@@ -17,16 +17,18 @@ groundcrew daemon          # the long-running process (service entry point)
 
 The registry is `~/.config/groundcrew/repos.toml`, maintained by
 `add`/`remove`; settings live beside it in `config.toml` (see
-[Install](docs/install.md)). New clones never join silently — `status` lists
-unregistered repos it finds under the projects root.
+[Configuration](docs/configuration.md)). New clones never join silently —
+`status` lists unregistered repos it finds under the projects root.
 
 ## Documentation
 
 - **[Architecture](docs/architecture.md)** — how the daemon, supervisors, and
   session engines fit together, why restarts never lose work, and the
   reconcile/tick/nightly loop.
-- **[Install](docs/install.md)** — Linux/systemd setup, host preparation,
-  Pushover alerting, and notes on running under macOS/launchd.
+- **[Install](docs/install.md)** — `uv tool install git+…`, Linux/systemd and
+  macOS/launchd setup, and the upgrade runbook.
+- **[Configuration](docs/configuration.md)** — the config file, per-repo
+  overrides, notifier commands, and the post-pull hook.
 
 ## Development
 
