@@ -1,15 +1,16 @@
-"""Command-line interface: daemon, status, add, remove, clean."""
+"""Command-line interface: daemon, status, add, remove, clean, logs."""
 
 from __future__ import annotations
 
 import argparse
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from groundcrew import claude_state, gitops
+from groundcrew import claude_state, gitops, supervise
 from groundcrew.config import (
     EX_CONFIG,
     Config,
@@ -169,6 +170,21 @@ def cmd_clean(raw: str) -> int:
     return 0
 
 
+def cmd_logs(raw: str, lines: int, *, verbatim: bool) -> int:
+    repo = Path(raw).expanduser().resolve()
+    path = supervise.log_path(repo)
+    if not path.exists():
+        print(f"no supervisor log for {repo} — has it ever been spawned?", file=sys.stderr)
+        return 1
+    # Deduplication needs the whole file anyway: what a tail would cut is the
+    # first sighting of a line the visible frames go on repeating.
+    text = path.read_text(errors="replace")
+    body = text.splitlines() if verbatim else list(supervise.readable_log(text))
+    for line in body[-lines:]:
+        print(line)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="groundcrew", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -180,6 +196,12 @@ def main() -> int:
     p_remove.add_argument("paths", nargs="+")
     p_clean = sub.add_parser("clean", help="interactively delete spawned worktrees")
     p_clean.add_argument("repo")
+    p_logs = sub.add_parser("logs", help="read a repo's supervisor log")
+    p_logs.add_argument("repo")
+    p_logs.add_argument("-n", "--lines", type=int, default=50, help="tail this many (default 50)")
+    p_logs.add_argument(
+        "--raw", action="store_true", help="keep the control codes and repeated frames"
+    )
     args = parser.parse_args()
 
     try:
@@ -189,17 +211,17 @@ def main() -> int:
         return EX_CONFIG
 
     if args.command == "daemon":
-        run_daemon(cfg)
+        run_daemon(cfg)  # runs until signalled, so it is not one of the table's calls
         return 0
-    if args.command == "status":
-        return cmd_status(cfg)
-    if args.command == "add":
-        return cmd_add(args.paths)
-    if args.command == "remove":
-        return cmd_remove(args.paths)
-    if args.command == "clean":
-        return cmd_clean(args.repo)
-    raise AssertionError(f"unhandled command {args.command}")
+    # argparse refuses anything not registered above, so a missing key is a bug.
+    commands: dict[str, Callable[[], int]] = {
+        "status": lambda: cmd_status(cfg),
+        "add": lambda: cmd_add(args.paths),
+        "remove": lambda: cmd_remove(args.paths),
+        "clean": lambda: cmd_clean(args.repo),
+        "logs": lambda: cmd_logs(args.repo, args.lines, verbatim=args.raw),
+    }
+    return commands[args.command]()
 
 
 if __name__ == "__main__":
