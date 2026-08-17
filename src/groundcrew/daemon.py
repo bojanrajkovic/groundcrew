@@ -15,7 +15,6 @@ instance re-adopts them from the process table.
 
 from __future__ import annotations
 
-import enum
 import logging
 import os
 import signal
@@ -40,6 +39,7 @@ from groundcrew.config import (
     load_registry,
     state_dir,
 )
+from groundcrew.supervise import RepoState, WarningKind
 
 log = logging.getLogger("groundcrew")
 
@@ -105,28 +105,6 @@ def discover_unregistered(registry: list[Path], root: Path) -> list[Path]:
     return found
 
 
-class RepoState(BaseModel):
-    """One repo's row in the fleet snapshot `status` reads."""
-
-    pid: int | None
-    created: float | None
-    version: str | None
-    spawned_at: float | None
-    last_pull_at: float
-    last_pull_kind: str
-    last_pull_detail: str
-    pull_failures: int
-    backoff_until: float
-    warnings: list[str]
-
-    def alive(self) -> bool:
-        return (
-            self.pid is not None
-            and self.created is not None
-            and claude_state.process_is(self.pid, self.created)
-        )
-
-
 class FleetState(BaseModel):
     """The snapshot written every poll pass and rendered by `groundcrew status`."""
 
@@ -137,26 +115,6 @@ class FleetState(BaseModel):
     registered: list[str]
     unregistered: list[str]
     repos: dict[str, RepoState]
-
-
-class WarningKind(enum.Enum):
-    """Identity and lifecycle key for a repo warning.
-
-    Each kind has exactly one producer, and that producer owns the full
-    lifecycle: it clears its kinds at the top of its pass and sets them for
-    conditions that hold. No function touches another producer's kinds, so
-    warning correctness never depends on call ordering.
-    """
-
-    PARKED = "parked"  # pull_repo
-    DIRTY = "dirty"
-    DIVERGED = "diverged"
-    PULL = "pull"
-    POST_PULL = "post_pull"
-    DEFERRED = "deferred"
-    DRIFT = "drift"  # maybe_restart_for_drift
-    UNTRUSTED = "untrusted"  # reconcile
-    MISSING = "missing"
 
 
 @dataclass

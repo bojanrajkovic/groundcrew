@@ -13,12 +13,11 @@ from groundcrew import daemon as daemon_mod
 from groundcrew.daemon import (
     Daemon,
     RepoRuntime,
-    WarningKind,
     discover_unregistered,
     next_nightly,
     notify,
 )
-from groundcrew.supervise import CrashTracker
+from groundcrew.supervise import CrashTracker, WarningKind
 
 
 def script(path: Path, body: str) -> Path:

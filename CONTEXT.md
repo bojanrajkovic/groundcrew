@@ -6,6 +6,12 @@ in-flight sessions.
 
 ## Language
 
+**Supervised repo**:
+The unit of supervision: one registered repository together with its
+supervisor, sessions, freshness state, warnings, and crash history. The
+daemon is a fleet of these plus fleet-wide concerns (updates, rollouts).
+_Avoid_: runtime, repo state
+
 **Supervisor**:
 The long-lived `claude remote-control` process groundcrew runs in a repo. One
 per registered repo.

@@ -1,4 +1,10 @@
-"""Supervisor process management: spawn, adopt, liveness, termination.
+"""The supervised repo: entity decisions plus supervisor process management.
+
+The entity half follows ADR 0004: SupervisedRepo methods take world
+observations as values and return decisions as values; the daemon (the
+imperative shell) performs effects and feeds outcomes back. The process
+half below it — spawn, adopt, liveness, termination — is the mechanics the
+shell uses to execute those decisions.
 
 Each managed repo gets one `claude remote-control` process launched with that
 repo's effective settings. Children are spawned with start_new_session=True so
@@ -12,6 +18,7 @@ worktrees.
 from __future__ import annotations
 
 import contextlib
+import enum
 import os
 import signal
 import subprocess
@@ -22,16 +29,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import psutil
+from pydantic import BaseModel
 
 from groundcrew.claude_state import proc_create_time, process_is
 from groundcrew.config import (
     BACKOFF_SECONDS,
     CRASH_LIMIT,
     CRASH_WINDOW_SECONDS,
+    PULL_FAILURES_BEFORE_ALERT,
     TERMINATE_TIMEOUT,
     RepoSettings,
     state_dir,
 )
+from groundcrew.gitops import PullKind, PullOutcome
 
 
 def rc_args(settings: RepoSettings) -> tuple[str, ...]:
@@ -210,3 +220,245 @@ class CrashTracker:
 
     def in_backoff(self, now: float) -> bool:
         return now < self.backoff_until
+
+
+# ── the supervised repo entity (ADR 0004) ────────────────────────────────────
+
+
+class WarningKind(enum.Enum):
+    """Identity and lifecycle key for a repo warning.
+
+    Each kind has exactly one producer, and that producer owns the full
+    lifecycle: it clears its kinds at the top of its pass and sets them for
+    conditions that hold. No function touches another producer's kinds, so
+    warning correctness never depends on call ordering.
+    """
+
+    PARKED = "parked"  # freshness
+    DIRTY = "dirty"
+    DIVERGED = "diverged"
+    PULL = "pull"
+    POST_PULL = "post_pull"
+    DEFERRED = "deferred"
+    DRIFT = "drift"  # plan_drift
+    UNTRUSTED = "untrusted"  # plan_supervision
+    MISSING = "missing"
+
+
+class RepoState(BaseModel):
+    """One repo's row in the fleet snapshot `status` reads."""
+
+    pid: int | None
+    created: float | None
+    version: str | None
+    spawned_at: float | None
+    last_pull_at: float
+    last_pull_kind: str
+    last_pull_detail: str
+    pull_failures: int
+    backoff_until: float
+    warnings: list[str]
+
+    def alive(self) -> bool:
+        return (
+            self.pid is not None and self.created is not None and process_is(self.pid, self.created)
+        )
+
+
+class Plan(enum.Enum):
+    SPAWN = "spawn"
+    WAIT = "wait"
+
+
+class Retire(enum.Enum):
+    TERMINATE = "terminate"
+    FORGET = "forget"  # supervisor already dead; just release it
+    WAIT = "wait"
+
+
+class Fresh(enum.Enum):
+    PULL = "pull"
+    SKIP = "skip"
+
+
+@dataclass(frozen=True)
+class Alert:
+    title: str
+    message: str
+
+
+@dataclass(frozen=True)
+class RunHook:
+    command: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Restart:
+    reason: str
+
+
+@dataclass(frozen=True)
+class Defer:
+    reason: str
+
+
+@dataclass
+class SupervisedRepo:
+    """The unit of supervision: decisions over values, bookkeeping as the only mutation.
+
+    Methods observe the world through parameters (never by reaching out) and
+    answer with decision values the shell executes. See ADR 0004.
+    """
+
+    path: Path
+    settings: RepoSettings
+    supervisor: Supervisor | None = None
+    crashes: CrashTracker = field(default_factory=CrashTracker)
+    pull_failures: int = 0
+    pull_alerted: bool = False
+    last_pull_at: float = 0.0
+    last_pull_kind: str = ""
+    last_pull_detail: str = ""
+    warnings: dict[WarningKind, str] = field(default_factory=dict)
+
+    # -- supervision ------------------------------------------------------
+
+    def plan_supervision(
+        self, now: float, *, present: bool, trusted: bool, alive: bool
+    ) -> Plan | Alert:
+        """Should the shell spawn a supervisor here? Alert = crash breaker tripped."""
+        self.warnings.pop(WarningKind.UNTRUSTED, None)
+        self.warnings.pop(WarningKind.MISSING, None)
+        if not present:
+            self.warnings[WarningKind.MISSING] = "missing: directory does not exist"
+            return Plan.WAIT
+        if self.supervisor is not None and alive:
+            return Plan.WAIT
+        if self.supervisor is not None:
+            self.supervisor = None
+            if self.crashes.record(now):
+                return Alert(
+                    "groundcrew: crash loop",
+                    f"{self.path.name} supervisor crash-looping; backing off",
+                )
+        if self.crashes.in_backoff(now):
+            return Plan.WAIT
+        if not trusted:
+            self.warnings[WarningKind.UNTRUSTED] = (
+                "untrusted: run `groundcrew add` to seed workspace trust"
+            )
+            return Plan.WAIT
+        return Plan.SPAWN
+
+    def plan_retirement(self, *, alive: bool, quiet: bool) -> Retire:
+        if self.supervisor is None:
+            return Retire.WAIT
+        if not alive:
+            return Retire.FORGET
+        return Retire.TERMINATE if quiet else Retire.WAIT
+
+    # -- freshness --------------------------------------------------------
+
+    def plan_freshness(self, session_count: int) -> Fresh:
+        """May the shell pull? same-dir sessions share the working tree."""
+        for kind in (
+            WarningKind.PARKED,
+            WarningKind.DIRTY,
+            WarningKind.DIVERGED,
+            WarningKind.PULL,
+            WarningKind.POST_PULL,
+            WarningKind.DEFERRED,
+        ):
+            self.warnings.pop(kind, None)
+        if self.settings.spawn == "same-dir" and session_count > 0:
+            self.warnings[WarningKind.DEFERRED] = (
+                f"deferred: pull skipped, {session_count} live session(s) share the working tree"
+            )
+            return Fresh.SKIP
+        return Fresh.PULL
+
+    def on_pull(self, outcome: PullOutcome, now: float) -> RunHook | Alert | None:
+        self.last_pull_at = now
+        self.last_pull_kind = outcome.kind.value
+        self.last_pull_detail = outcome.detail
+        if outcome.parked:
+            self.warnings[WarningKind.PARKED] = (
+                "parked: checkout is not on the default branch; spawns base on HEAD"
+            )
+        if outcome.kind is PullKind.FETCHED_DIRTY:
+            self.warnings[WarningKind.DIRTY] = f"dirty: {outcome.detail}"
+        if outcome.kind is PullKind.DIVERGED:
+            # A repo state needing a human; not an infrastructure failure, so it
+            # neither counts toward nor masks the consecutive-failure alert.
+            self.warnings[WarningKind.DIVERGED] = f"diverged: {outcome.detail}"
+            return None
+        if outcome.kind is PullKind.FAILED:
+            self.pull_failures += 1
+            self.warnings[WarningKind.PULL] = (
+                f"pull failing x{self.pull_failures}: {outcome.detail}"
+            )
+            if self.pull_failures >= PULL_FAILURES_BEFORE_ALERT and not self.pull_alerted:
+                self.pull_alerted = True
+                return Alert("groundcrew: pull failing", f"{self.path.name}: {outcome.detail}")
+            return None
+        self.pull_failures = 0
+        self.pull_alerted = False
+        if outcome.moved and not outcome.parked and self.settings.post_pull:
+            # Parked repos get ref-only updates; the working tree didn't change,
+            # so refreshing its toolchain would act on a tree the pull never touched.
+            return RunHook(self.settings.post_pull)
+        return None
+
+    def on_hook_result(self, error: str | None) -> Alert | None:
+        if error is None:
+            return None
+        self.warnings[WarningKind.POST_PULL] = f"post_pull failed: {error}"
+        return Alert("groundcrew: post_pull failed", f"{self.path.name}: {error}")
+
+    # -- drift ------------------------------------------------------------
+
+    def plan_drift(
+        self, binary_version: str | None, probed_version: str | None, *, quiet: bool
+    ) -> Restart | Defer | None:
+        """Does the supervisor match the desired (version, args) pair? None = converged.
+
+        probed_version fills a hole adoption leaves open (adoptees carry no
+        launched_version); the shell observes it, the owner records it here.
+        """
+        self.warnings.pop(WarningKind.DRIFT, None)
+        sup = self.supervisor
+        if sup is None or binary_version is None:
+            return None
+        if sup.launched_version is None and probed_version is not None:
+            sup.launched_version = probed_version
+        reasons = []
+        if sup.launched_version != binary_version:
+            reasons.append(f"version {sup.launched_version} -> {binary_version}")
+        if sup.launched_args != rc_args(self.settings):
+            reasons.append("args")
+        if not reasons:
+            return None
+        reason = " + ".join(reasons)
+        if not quiet:
+            self.warnings[WarningKind.DRIFT] = (
+                f"drift ({reason}): restart deferred, session(s) active"
+            )
+            return Defer(reason)
+        return Restart(reason)
+
+    # -- snapshot ---------------------------------------------------------
+
+    def to_state(self) -> RepoState:
+        sup = self.supervisor
+        return RepoState(
+            pid=sup.pid if sup else None,
+            created=sup.created if sup else None,
+            version=sup.launched_version if sup else None,
+            spawned_at=sup.spawned_at if sup else None,
+            last_pull_at=self.last_pull_at,
+            last_pull_kind=self.last_pull_kind,
+            last_pull_detail=self.last_pull_detail,
+            pull_failures=self.pull_failures,
+            backoff_until=self.crashes.backoff_until,
+            warnings=list(self.warnings.values()),
+        )

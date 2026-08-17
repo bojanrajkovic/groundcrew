@@ -19,7 +19,8 @@ from groundcrew.config import (
     save_registry,
     state_dir,
 )
-from groundcrew.daemon import FleetState, RepoState, run_daemon
+from groundcrew.daemon import FleetState, run_daemon
+from groundcrew.supervise import RepoState
 
 
 def cmd_add(paths: list[str]) -> int:
