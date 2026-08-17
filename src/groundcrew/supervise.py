@@ -23,7 +23,7 @@ from pathlib import Path
 
 import psutil
 
-from groundcrew.claude_state import proc_create_time
+from groundcrew.claude_state import proc_create_time, process_is
 from groundcrew.config import (
     BACKOFF_SECONDS,
     CRASH_LIMIT,
@@ -65,7 +65,7 @@ class Supervisor:
     def alive(self) -> bool:
         if self.handle is not None:
             self.handle.poll()  # reap if it exited, so no zombies linger
-        return proc_create_time(self.pid) == self.created
+        return process_is(self.pid, self.created)
 
 
 def log_path(repo: Path) -> Path:

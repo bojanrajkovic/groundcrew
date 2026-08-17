@@ -189,7 +189,15 @@ def test_status_warns_on_override_for_unregistered_repo(
     sandbox: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     write_config(sandbox, '[repos."/never/registered"]\ncapacity = 1\n')
-    state = {"updated_at": 0, "registered": [], "repos": {}, "unregistered": []}
+    state: dict[str, object] = {
+        "updated_at": 0,
+        "binary_version": None,
+        "pending_rollout": None,
+        "last_update_result": "",
+        "registered": [],
+        "unregistered": [],
+        "repos": {},
+    }
     (sandbox / "state").mkdir(exist_ok=True)
     (sandbox / "state" / "state.json").write_text(json.dumps(state))
 

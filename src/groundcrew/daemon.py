@@ -16,7 +16,6 @@ instance re-adopts them from the process table.
 from __future__ import annotations
 
 import enum
-import json
 import logging
 import os
 import signal
@@ -26,6 +25,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType
+
+from pydantic import BaseModel
 
 from groundcrew import claude_state, gitops, supervise
 from groundcrew.config import (
@@ -104,6 +105,40 @@ def discover_unregistered(registry: list[Path], root: Path) -> list[Path]:
     return found
 
 
+class RepoState(BaseModel):
+    """One repo's row in the fleet snapshot `status` reads."""
+
+    pid: int | None
+    created: float | None
+    version: str | None
+    spawned_at: float | None
+    last_pull_at: float
+    last_pull_kind: str
+    last_pull_detail: str
+    pull_failures: int
+    backoff_until: float
+    warnings: list[str]
+
+    def alive(self) -> bool:
+        return (
+            self.pid is not None
+            and self.created is not None
+            and claude_state.process_is(self.pid, self.created)
+        )
+
+
+class FleetState(BaseModel):
+    """The snapshot written every poll pass and rendered by `groundcrew status`."""
+
+    updated_at: float
+    binary_version: str | None
+    pending_rollout: str | None
+    last_update_result: str
+    registered: list[str]
+    unregistered: list[str]
+    repos: dict[str, RepoState]
+
+
 class WarningKind(enum.Enum):
     """Identity and lifecycle key for a repo warning.
 
@@ -144,6 +179,7 @@ class Daemon:
         self.binary_version: str | None = None
         self.pending_rollout: str | None = None
         self.last_update_result = ""
+        self.unregistered: list[str] = []
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -271,6 +307,9 @@ class Daemon:
             except Exception:
                 log.exception("drift check failed for %s", repo)
         self.check_rollout_complete()
+        # Discovery is a filesystem sweep; hourly freshness is plenty for a
+        # status hint, so it lives here rather than on every 30 s state write.
+        self.unregistered = [str(p) for p in discover_unregistered(registry, self.cfg.root)]
 
     def refresh_binary_version(self) -> None:
         version = claude_state.binary_version(self.cfg.claude_bin)
@@ -433,33 +472,33 @@ class Daemon:
     # -- state snapshot ----------------------------------------------------
 
     def write_state(self, registry: list[Path]) -> None:
-        repos: dict[str, object] = {}
+        repos: dict[str, RepoState] = {}
         for repo, rt in self.runtimes.items():
             if repo not in registry and rt.supervisor is None:
                 continue  # fully retired; keep runtime for crash history, not for status
             sup = rt.supervisor
-            repos[str(repo)] = {
-                "pid": sup.pid if sup else None,
-                "created": sup.created if sup else None,
-                "version": sup.launched_version if sup else None,
-                "spawned_at": sup.spawned_at if sup else None,
-                "last_pull_at": rt.last_pull_at,
-                "last_pull_kind": rt.last_pull_kind,
-                "last_pull_detail": rt.last_pull_detail,
-                "pull_failures": rt.pull_failures,
-                "backoff_until": rt.crashes.backoff_until,
-                "warnings": list(rt.warnings.values()),
-            }
-        state = {
-            "updated_at": time.time(),
-            "binary_version": self.binary_version,
-            "pending_rollout": self.pending_rollout,
-            "last_update_result": self.last_update_result,
-            "registered": [str(r) for r in registry],
-            "unregistered": [str(p) for p in discover_unregistered(registry, self.cfg.root)],
-            "repos": repos,
-        }
-        atomic_write(state_dir() / "state.json", json.dumps(state, indent=2))
+            repos[str(repo)] = RepoState(
+                pid=sup.pid if sup else None,
+                created=sup.created if sup else None,
+                version=sup.launched_version if sup else None,
+                spawned_at=sup.spawned_at if sup else None,
+                last_pull_at=rt.last_pull_at,
+                last_pull_kind=rt.last_pull_kind,
+                last_pull_detail=rt.last_pull_detail,
+                pull_failures=rt.pull_failures,
+                backoff_until=rt.crashes.backoff_until,
+                warnings=list(rt.warnings.values()),
+            )
+        state = FleetState(
+            updated_at=time.time(),
+            binary_version=self.binary_version,
+            pending_rollout=self.pending_rollout,
+            last_update_result=self.last_update_result,
+            registered=[str(r) for r in registry],
+            unregistered=self.unregistered,
+            repos=repos,
+        )
+        atomic_write(state_dir() / "state.json", state.model_dump_json(indent=2))
 
 
 def run_daemon(cfg: Config) -> None:

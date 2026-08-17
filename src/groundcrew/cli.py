@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
+
+from pydantic import ValidationError
 
 from groundcrew import claude_state, gitops
 from groundcrew.config import (
@@ -18,7 +19,7 @@ from groundcrew.config import (
     save_registry,
     state_dir,
 )
-from groundcrew.daemon import run_daemon
+from groundcrew.daemon import FleetState, RepoState, run_daemon
 
 
 def cmd_add(paths: list[str]) -> int:
@@ -68,19 +69,16 @@ def _ago(then: float, now: float) -> str:
 
 def _print_repo_row(
     path_str: str,
-    info: dict[str, object],
+    info: RepoState,
     sessions: list[claude_state.SessionInfo],
     root: str,
     now: float,
 ) -> None:
     repo = Path(path_str)
-    pid = info.get("pid")
-    alive = isinstance(pid, int) and claude_state.proc_create_time(pid) == info.get("created")
-    backoff_until = info.get("backoff_until")
-    if alive:
-        sup = f"up {pid}"
-    elif isinstance(backoff_until, (int, float)) and backoff_until > now:
-        sup = f"backoff {int((backoff_until - now) / 60)}m"
+    if info.alive():
+        sup = f"up {info.pid}"
+    elif info.backoff_until > now:
+        sup = f"backoff {int((info.backoff_until - now) / 60)}m"
     else:
         sup = "DOWN"
     repo_sessions = claude_state.rc_sessions_for(repo, sessions)
@@ -89,15 +87,11 @@ def _print_repo_row(
         sess = f"{len(repo_sessions)} ({quiet_min:.0f}m quiet)"
     else:
         sess = "0"
-    pull_at = info.get("last_pull_at")
-    pull_at = pull_at if isinstance(pull_at, (int, float)) else 0.0
-    pull = f"{info.get('last_pull_kind') or '-'} {_ago(pull_at, now)}"
+    pull = f"{info.last_pull_kind or '-'} {_ago(info.last_pull_at, now)}"
     name = path_str.removeprefix(root)
-    print(f"{name:<34} {sup:<10} {info.get('version') or '?':<10} {sess:<12} {pull:<22}")
-    warnings = info.get("warnings")
-    if isinstance(warnings, list):
-        for warning in warnings:
-            print(f"{'':<34} ⚠ {warning}")
+    print(f"{name:<34} {sup:<10} {info.version or '?':<10} {sess:<12} {pull:<22}")
+    for warning in info.warnings:
+        print(f"{'':<34} ⚠ {warning}")
     for wt in gitops.spawned_worktrees(repo):
         if wt.dirty_files:
             print(
@@ -111,34 +105,33 @@ def cmd_status(cfg: Config) -> int:
     if not state_path.exists():
         print("no state file — is the daemon running? (systemctl --user status groundcrew)")
         return 1
-    state = json.loads(state_path.read_text())
+    try:
+        state = FleetState.model_validate_json(state_path.read_text())
+    except ValidationError as exc:
+        print(f"state file unreadable (daemon version mismatch?): {exc}", file=sys.stderr)
+        return 1
     now = time.time()
-    updated = _ago(float(state.get("updated_at", 0)), now)
-    print(f"claude {state.get('binary_version')} · state updated {updated}")
-    if state.get("last_update_result"):
-        print(f"last nightly update: {state['last_update_result']}")
+    print(f"claude {state.binary_version} · state updated {_ago(state.updated_at, now)}")
+    if state.last_update_result:
+        print(f"last nightly update: {state.last_update_result}")
 
     sessions = claude_state.live_sessions()
     root = str(cfg.root) + "/"
-    repos: dict[str, dict[str, object]] = state.get("repos", {})
     header = f"{'REPO':<34} {'SUP':<10} {'VER':<10} {'SESS':<12} {'LAST PULL':<22}"
     print()
     print(header)
-    for path_str in sorted(repos):
-        _print_repo_row(path_str, repos[path_str], sessions, root, now)
+    for path_str in sorted(state.repos):
+        _print_repo_row(path_str, state.repos[path_str], sessions, root, now)
 
-    registered = state.get("registered", [])
-    if isinstance(registered, list):
-        unmatched = sorted(str(p) for p in cfg.overrides if str(p) not in registered)
-        for path_str in unmatched:
-            print(f"⚠ config override for unregistered repo: {path_str}")
+    unmatched = sorted(str(p) for p in cfg.overrides if str(p) not in state.registered)
+    for path_str in unmatched:
+        print(f"⚠ config override for unregistered repo: {path_str}")
 
-    unregistered = state.get("unregistered", [])
-    if isinstance(unregistered, list) and unregistered:
+    if state.unregistered:
         print()
         print("not managed (register with `groundcrew add`):")
-        for path_str in unregistered:
-            print(f"  {str(path_str).removeprefix(root)}")
+        for path_str in state.unregistered:
+            print(f"  {path_str.removeprefix(root)}")
     return 0
 
 

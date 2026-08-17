@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from conftest import add_origin_commit, clone, git, make_repo
 
-from groundcrew import claude_state, config, gitops, supervise
+from groundcrew import claude_state, cli, config, gitops, supervise
 from groundcrew import daemon as daemon_mod
 from groundcrew.daemon import (
     Daemon,
@@ -233,6 +233,26 @@ def test_same_dir_repo_defers_pull_while_sessions_live(
     daemon.pull_repo(repo, rt, time.time())
 
     assert WarningKind.DEFERRED in rt.warnings
+
+
+def test_state_round_trips_from_daemon_to_status(
+    sandbox: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = config.load()
+    daemon = Daemon(cfg)
+    repo = sandbox / "projects" / "repo"
+    repo.mkdir()
+    rt = daemon.runtimes.setdefault(repo, RepoRuntime())
+    rt.supervisor = live_supervisor(repo, ("remote-control",), "9.9.9")
+    rt.warnings[WarningKind.PARKED] = "parked: test warning"
+
+    daemon.write_state([repo])
+
+    assert cli.cmd_status(cfg) == 0
+    out = capsys.readouterr().out
+    assert f"up {os.getpid()}" in out  # liveness via the shared process_is rule
+    assert "9.9.9" in out
+    assert "⚠ parked: test warning" in out
 
 
 def test_registry_round_trip(sandbox: Path) -> None:

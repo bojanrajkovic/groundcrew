@@ -87,6 +87,15 @@ def proc_create_time(pid: int) -> float | None:
         return None
 
 
+def process_is(pid: int, created: float) -> bool:
+    """Is the process wearing this PID the one recorded at `created`?
+
+    The one implementation of the PID-reuse-safe identity check: a recycled
+    PID has a different creation time, a dead one has none.
+    """
+    return proc_create_time(pid) == created
+
+
 @dataclass(frozen=True)
 class SessionInfo:
     pid: int
