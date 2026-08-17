@@ -34,6 +34,26 @@ PUSHOVER_USER=...
 # SSH_AUTH_SOCK=/run/user/1000/... if ssh-agent auth is needed for pulls
 ```
 
+### Reading the logs
+
+groundcrew installs as a **user** unit, so its journal is in the user scope.
+`journalctl -u groundcrew` searches the system scope and reports no entries:
+
+```sh
+journalctl --user -u groundcrew -f          # follow
+journalctl --user -u groundcrew -p warning  # warnings and errors only
+```
+
+The daemon logs state changes — spawns, deaths, retirements, drift, pull
+failures — not ticks. A healthy fleet is quiet between them; `groundcrew
+status` prints how long ago the last poll wrote state, which is the liveness
+check the journal deliberately does not repeat every 30 seconds.
+
+Supervisor output is separate. Each `claude remote-control` child writes to
+`~/.local/state/groundcrew/logs/<repo-path>.log`, keeping the fleet's own
+records out of the daemon's journal, where the volume would trip journald's
+per-unit rate limit and drop the daemon's lines with it.
+
 ## macOS (launchd)
 
 Setup uses the two templates in `launchd/`: a LaunchAgent plist and a
@@ -69,7 +89,9 @@ Honest caveats:
   macOS too, but a Homebrew-installed `claude` lands in `/opt/homebrew/bin`
   — point `[claude].bin` at it in [config.toml](configuration.md).
 - **No journald.** Logs go to `~/Library/Logs/groundcrew.log`; rotate it
-  yourself (`newsyslog.d`) if the fleet is chatty.
+  yourself (`newsyslog.d`) if the fleet is chatty. Because a flat file has no
+  record fields, lines there carry their own timestamp and level, where the
+  journald format leaves both to the journal.
 
 ## Upgrading from a pre-config version
 

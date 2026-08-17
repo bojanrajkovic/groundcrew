@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +12,14 @@ from conftest import add_origin_commit, clone, make_repo, script, write_config
 
 from groundcrew import claude_state, cli, config, supervise
 from groundcrew.config import RepoSettings
-from groundcrew.daemon import Daemon, discover_unregistered, next_nightly, notify
+from groundcrew.daemon import (
+    Daemon,
+    JournalPriority,
+    discover_unregistered,
+    log_handler,
+    next_nightly,
+    notify,
+)
 from groundcrew.supervise import CrashTracker, WarningKind
 
 # ── the notifier contract ───────────────────────────────────────────────────
@@ -272,3 +281,45 @@ def test_crash_tracker_forgets_old_events() -> None:
     assert not tracker.record(now + 1)
     # third crash far outside the window does not trip the breaker
     assert not tracker.record(now + config.CRASH_WINDOW_SECONDS + 60)
+
+
+# ── log formatting ──────────────────────────────────────────────────────────
+
+
+def record(level: int, message: str) -> logging.LogRecord:
+    return logging.LogRecord("groundcrew", level, __file__, 1, message, None, None)
+
+
+def test_journal_formatter_maps_levels_to_syslog_priorities() -> None:
+    fmt = JournalPriority("%(message)s")
+
+    assert fmt.format(record(logging.INFO, "up")) == "<6>up"
+    assert fmt.format(record(logging.WARNING, "pull failing")) == "<4>pull failing"
+    assert fmt.format(record(logging.ERROR, "crash loop")) == "<3>crash loop"
+
+
+def test_journal_formatter_prefixes_every_line_of_a_traceback() -> None:
+    try:
+        int("not a registry")
+    except ValueError:
+        exc_info = sys.exc_info()
+    rec = logging.LogRecord("groundcrew", logging.ERROR, __file__, 1, "boom", None, exc_info)
+
+    lines = JournalPriority("%(message)s").format(rec).splitlines()
+
+    assert len(lines) > 1, "expected the traceback to be part of the formatted record"
+    assert all(line.startswith("<3>") for line in lines)
+
+
+def test_log_handler_uses_journal_priorities_only_under_systemd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOURNAL_STREAM", "8:12345")
+    assert log_handler().format(record(logging.WARNING, "pull failing")) == "<4>pull failing"
+
+    # launchd and a bare terminal get a flat line instead: no journald fields
+    # are there to carry the level and the timestamp.
+    monkeypatch.delenv("JOURNAL_STREAM")
+    plain = log_handler().format(record(logging.WARNING, "pull failing"))
+    assert plain.endswith("WARNING: pull failing")
+    assert not plain.startswith("<")
