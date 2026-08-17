@@ -3,7 +3,10 @@ name = "groundcrew"
 version = "0.1.0"
 description = "Daemon that keeps Claude Code remote-control environments running across a fleet of local repositories"
 requires-python = ">=3.12"
-dependencies = ["psutil>=7"]
+dependencies = [
+    "psutil>=7",
+    "pydantic>=2.13.4",
+]
 
 [project.scripts]
 groundcrew = "groundcrew.cli:main"

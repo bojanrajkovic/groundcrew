@@ -9,13 +9,13 @@ the pre-config behavior, unchanged.
 
 from __future__ import annotations
 
-import dataclasses
 import os
 import shutil
 import tomllib
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Annotated, Literal, get_args
+
+from pydantic import BaseModel, BeforeValidator, ConfigDict, ValidationError
 
 QUIET_SECONDS = 15 * 60
 TICK_SECONDS = 3600
@@ -44,18 +44,29 @@ class ConfigError(Exception):
     """A problem in config.toml, named precisely enough to fix from the message."""
 
 
-@dataclass(frozen=True)
-class RepoSettings:
+def _reject_session_spawn(value: object) -> object:
+    if value == "session":
+        raise ValueError(
+            '"session" is not supported — the supervisor must outlive individual '
+            f"sessions (allowed: {', '.join(get_args(Spawn))})"
+        )
+    return value
+
+
+class RepoSettings(BaseModel):
     """Effective per-repo settings; every field is overridable per repo."""
 
-    spawn: Spawn = "worktree"
+    model_config = ConfigDict(frozen=True)
+
+    spawn: Annotated[Spawn, BeforeValidator(_reject_session_spawn)] = "worktree"
     capacity: int = 32
     permission_mode: PermissionMode = "bypassPermissions"
     post_pull: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
-class Config:
+class Config(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     root: Path
     claude_bin: Path
     notify_command: tuple[str, ...] = ()
@@ -64,7 +75,7 @@ class Config:
     nightly_hour: int = NIGHTLY_HOUR
     post_pull_timeout: int = POST_PULL_TIMEOUT
     defaults: RepoSettings = RepoSettings()
-    overrides: dict[Path, RepoSettings] = field(default_factory=dict)
+    overrides: dict[Path, RepoSettings] = {}
 
     def for_repo(self, repo: Path) -> RepoSettings:
         return self.overrides.get(repo, self.defaults)
@@ -77,127 +88,174 @@ def config_dir() -> Path:
     return Path(xdg) / "groundcrew"
 
 
-def _check_keys(section: dict[str, object], allowed: tuple[str, ...], where: str) -> None:
-    for key in section:
-        if key not in allowed:
-            raise ConfigError(f"config.toml: {where}{key} is not a known key")
+# ── the file schema: what a human may write in config.toml ──────────────────
+# Strict (TOML already delivers exact types; no coercion surprises) and
+# extra="forbid" so any unknown key fails the load with its path named.
+
+_STRICT = ConfigDict(strict=True, extra="forbid")
 
 
-def _table(value: object, where: str) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise ConfigError(f"config.toml: {where} must be a table")
-    return value
+class _ClaudeTable(BaseModel):
+    model_config = _STRICT
+    spawn: Annotated[Spawn, BeforeValidator(_reject_session_spawn)] | None = None
+    capacity: int | None = None
+    permission_mode: PermissionMode | None = None
+    bin: str | None = None
 
 
-def _str(section: dict[str, object], key: str, where: str) -> str | None:
-    value = section.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ConfigError(f"config.toml: {where}{key} must be a string")
-    return value
+class _NotifyTable(BaseModel):
+    model_config = _STRICT
+    command: list[str] | None = None
 
 
-def _int(section: dict[str, object], key: str, where: str) -> int | None:
-    value = section.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ConfigError(f"config.toml: {where}{key} must be an integer")
-    return value
+class _HooksTable(BaseModel):
+    model_config = _STRICT
+    post_pull: list[str] | None = None
+    post_pull_timeout: int | None = None
 
 
-def _int_or(section: dict[str, object], key: str, where: str, default: int) -> int:
-    value = _int(section, key, where)
-    return default if value is None else value
+class _TimingTable(BaseModel):
+    model_config = _STRICT
+    quiet_seconds: int | None = None
+    tick_seconds: int | None = None
+    nightly_hour: int | None = None
 
 
-def _command(section: dict[str, object], key: str, where: str) -> tuple[str, ...] | None:
+class _RepoOverride(BaseModel):
+    model_config = _STRICT
+    spawn: Annotated[Spawn, BeforeValidator(_reject_session_spawn)] | None = None
+    capacity: int | None = None
+    permission_mode: PermissionMode | None = None
+    post_pull: list[str] | None = None
+
+
+class _ConfigFile(BaseModel):
+    model_config = _STRICT
+    root: str | None = None
+    claude: _ClaudeTable = _ClaudeTable()
+    notify: _NotifyTable = _NotifyTable()
+    hooks: _HooksTable = _HooksTable()
+    timing: _TimingTable = _TimingTable()
+    repos: dict[str, _RepoOverride] = {}
+
+
+def _format_loc(loc: tuple[str | int, ...]) -> str:
+    """("claude", "capacity") → [claude].capacity · ("repos", "/x", "bin") → [repos."/x"].bin"""
+    if not loc:
+        return "config.toml"
+    parts = list(loc)
+    if parts[0] == "repos" and len(parts) > 1:
+        head = f'[repos."{parts[1]}"]'
+        rest = parts[2:]
+    elif len(parts) == 1:
+        return str(parts[0])
+    else:
+        head = f"[{parts[0]}]"
+        rest = parts[1:]
+    out = head
+    for part in rest:
+        out += f"[{part}]" if isinstance(part, int) else f".{part}"
+    return out
+
+
+_TYPE_PHRASES = {
+    "int_type": "must be an integer",
+    "int_parsing": "must be an integer",
+    "string_type": "must be a string",
+    "list_type": "must be an array of strings",
+    "tuple_type": "must be an array of strings",
+    "model_type": "must be a table",
+    "dict_type": "must be a table",
+}
+
+
+def _translate(exc: ValidationError) -> ConfigError:
+    lines = []
+    for err in exc.errors():
+        path = _format_loc(tuple(err["loc"]))
+        kind = err["type"]
+        if kind == "extra_forbidden":
+            lines.append(f"config.toml: {path} is not a known key")
+        elif kind == "literal_error":
+            expected = err.get("ctx", {}).get("expected", "")
+            lines.append(
+                f"config.toml: {path} must be one of: {expected}, got {err.get('input')!r}"
+            )
+        elif kind == "value_error":
+            msg = err["msg"].removeprefix("Value error, ")
+            lines.append(f"config.toml: {path} {msg}")
+        elif kind in _TYPE_PHRASES:
+            lines.append(f"config.toml: {path} {_TYPE_PHRASES[kind]}")
+        else:
+            lines.append(f"config.toml: {path}: {err['msg']}")
+    return ConfigError("\n".join(lines))
+
+
+def _command(raw: list[str] | None) -> tuple[str, ...] | None:
     """A command array; argv[0] gets ~ expanded so config can point at scripts."""
-    value = section.get(key)
-    if value is None:
+    if raw is None:
         return None
-    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        raise ConfigError(f"config.toml: {where}{key} must be an array of strings")
-    if not value:
+    if not raw:
         return ()
-    return (str(Path(value[0]).expanduser()), *value[1:])
+    return (str(Path(raw[0]).expanduser()), *raw[1:])
 
 
-def _repo_settings(section: dict[str, object], base: RepoSettings, where: str) -> RepoSettings:
-    _check_keys(section, ("spawn", "capacity", "permission_mode", "post_pull"), where)
-    updates: dict[str, object] = {}
-    if (spawn := _str(section, "spawn", where)) is not None:
-        if spawn == "session":
-            raise ConfigError(
-                f'config.toml: {where}spawn "session" is not supported — the '
-                f"supervisor must outlive individual sessions "
-                f"(allowed: {', '.join(get_args(Spawn))})"
-            )
-        if spawn not in get_args(Spawn):
-            raise ConfigError(
-                f"config.toml: {where}spawn must be one of: {', '.join(get_args(Spawn))}, "
-                f"got {spawn!r}"
-            )
-        updates["spawn"] = spawn
-    if (capacity := _int(section, "capacity", where)) is not None:
-        updates["capacity"] = capacity
-    if (mode := _str(section, "permission_mode", where)) is not None:
-        if mode not in get_args(PermissionMode):
-            raise ConfigError(
-                f"config.toml: {where}permission_mode must be one of: "
-                f"{', '.join(get_args(PermissionMode))}, got {mode!r}"
-            )
-        updates["permission_mode"] = mode
-    if (post_pull := _command(section, "post_pull", where)) is not None:
-        updates["post_pull"] = post_pull
-    return dataclasses.replace(base, **updates)  # type: ignore[arg-type]
+def _or(value: int | None, default: int) -> int:
+    return default if value is None else value
 
 
 def load() -> Config:
     path = config_dir() / "config.toml"
     try:
-        data: dict[str, object] = tomllib.loads(path.read_text())
+        data = tomllib.loads(path.read_text())
     except FileNotFoundError:
         data = {}
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: {exc}") from exc
 
-    _check_keys(data, ("root", "claude", "notify", "hooks", "timing", "repos"), "")
-    claude = _table(data.get("claude", {}), "[claude]")
-    _check_keys(claude, ("spawn", "capacity", "permission_mode", "bin"), "[claude].")
-    notify = _table(data.get("notify", {}), "[notify]")
-    _check_keys(notify, ("command",), "[notify].")
-    hooks = _table(data.get("hooks", {}), "[hooks]")
-    _check_keys(hooks, ("post_pull", "post_pull_timeout"), "[hooks].")
-    timing = _table(data.get("timing", {}), "[timing]")
-    _check_keys(timing, ("quiet_seconds", "tick_seconds", "nightly_hour"), "[timing].")
+    try:
+        file = _ConfigFile.model_validate(data)
+    except ValidationError as exc:
+        raise _translate(exc) from exc
 
-    defaults = _repo_settings(
-        {k: v for k, v in claude.items() if k != "bin"}, RepoSettings(), "[claude]."
-    )
-    if "post_pull" in hooks:
-        defaults = _repo_settings({"post_pull": hooks["post_pull"]}, defaults, "[hooks].")
+    defaults = RepoSettings()
+    updates: dict[str, object] = {
+        k: v
+        for k, v in {
+            "spawn": file.claude.spawn,
+            "capacity": file.claude.capacity,
+            "permission_mode": file.claude.permission_mode,
+            "post_pull": _command(file.hooks.post_pull),
+        }.items()
+        if v is not None
+    }
+    defaults = defaults.model_copy(update=updates)
 
     overrides: dict[Path, RepoSettings] = {}
-    for raw_key, raw_table in _table(data.get("repos", {}), "[repos]").items():
-        where = f'[repos."{raw_key}"].'
-        table = _table(raw_table, f'[repos."{raw_key}"]')
-        overrides[Path(raw_key).expanduser()] = _repo_settings(table, defaults, where)
+    for raw_key, table in file.repos.items():
+        table_updates: dict[str, object] = {
+            k: v
+            for k, v in {
+                "spawn": table.spawn,
+                "capacity": table.capacity,
+                "permission_mode": table.permission_mode,
+                "post_pull": _command(table.post_pull),
+            }.items()
+            if v is not None
+        }
+        overrides[Path(raw_key).expanduser()] = defaults.model_copy(update=table_updates)
 
     env_root = os.environ.get("GROUNDCREW_ROOT")
-    file_root = _str(data, "root", "")
-    root = Path(env_root or file_root or str(Path.home() / "Projects")).expanduser()
+    root = Path(env_root or file.root or str(Path.home() / "Projects")).expanduser()
 
-    file_bin = _str(claude, "bin", "[claude].")
     return Config(
         root=root,
-        claude_bin=Path(file_bin).expanduser() if file_bin else claude_bin(),
-        notify_command=_command(notify, "command", "[notify].") or (),
-        quiet_seconds=_int_or(timing, "quiet_seconds", "[timing].", QUIET_SECONDS),
-        tick_seconds=_int_or(timing, "tick_seconds", "[timing].", TICK_SECONDS),
-        nightly_hour=_int_or(timing, "nightly_hour", "[timing].", NIGHTLY_HOUR),
-        post_pull_timeout=_int_or(hooks, "post_pull_timeout", "[hooks].", POST_PULL_TIMEOUT),
+        claude_bin=Path(file.claude.bin).expanduser() if file.claude.bin else claude_bin(),
+        notify_command=_command(file.notify.command) or (),
+        quiet_seconds=_or(file.timing.quiet_seconds, QUIET_SECONDS),
+        tick_seconds=_or(file.timing.tick_seconds, TICK_SECONDS),
+        nightly_hour=_or(file.timing.nightly_hour, NIGHTLY_HOUR),
+        post_pull_timeout=_or(file.hooks.post_pull_timeout, POST_PULL_TIMEOUT),
         defaults=defaults,
         overrides=overrides,
     )
