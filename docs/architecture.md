@@ -45,7 +45,7 @@ tested against real substrate (git repos, processes, scripts).
 
 ## The loop
 
-| Cadence | Work |
+| Cadence (defaults; tick and nightly hour are config) | Work |
 |---|---|
 | 30 s | Reconcile: spawn missing supervisors, respawn dead ones (crash-loop breaker: 3 deaths in 10 min → 30 min backoff + a notification), retire unregistered repos when quiet |
 | hourly | Per repo: freshness pull → the post-pull hook when the default branch moved in-tree → drift restart when all sessions are quiet |
@@ -74,9 +74,9 @@ root, so freshness pulls are skipped whenever such a repo has any live
 session — quiet is not enough when the working tree is shared.
 
 Pull policy: on the default branch and clean → `git pull --ff-only`; parked on
-another branch → `git fetch origin main:main` (updates the ref, never touches
-the working tree); on the default branch but dirty → fetch only, plus a status
-warning. Only modified *tracked* files count as dirty. A diverged local
+another branch → `git fetch origin <default>:<default>` (updates the ref,
+never touches the working tree); on the default branch but dirty → fetch only,
+plus a status warning. Only modified *tracked* files count as dirty. A diverged local
 default branch is classified as `diverged` — a warning for a human, not an
 infrastructure failure, so it never triggers the consecutive-failure alert.
 
