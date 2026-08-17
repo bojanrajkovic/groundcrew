@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from groundcrew import cli, supervise
-from groundcrew.config import RepoSettings
+from groundcrew.config import LOG_MAX_BYTES, RepoSettings
 from groundcrew.supervise import ProcRecord, match_orphans, rc_args
 
 RC_ARGV = (
@@ -208,3 +208,46 @@ def test_cmd_logs_reports_a_repo_that_never_spawned(
 ) -> None:
     assert cli.cmd_logs(str(sandbox / "projects" / "never"), 50, verbatim=False) == 1
     assert "no supervisor log" in capsys.readouterr().err
+
+
+def test_rotate_log_retires_an_oversized_log_and_keeps_one_generation(sandbox: Path) -> None:
+    repo = sandbox / "projects" / "thing"
+    path = supervise.log_path(repo)
+    path.write_text("older\n" * 500)
+
+    supervise.rotate_log(repo, limit=100)
+
+    assert not path.exists(), "the oversized log must move aside for the next supervisor"
+    assert supervise.previous_log(path).read_text().startswith("older")
+
+    path.write_text("newer\n" * 500)
+    supervise.rotate_log(repo, limit=100)
+
+    # Only one generation is kept: the second rotation discards the first.
+    assert supervise.previous_log(path).read_text().startswith("newer")
+
+
+def test_rotate_log_leaves_a_log_under_the_limit_alone(sandbox: Path) -> None:
+    repo = sandbox / "projects" / "thing"
+    path = supervise.log_path(repo)
+    path.write_text("short\n")
+
+    supervise.rotate_log(repo, limit=LOG_MAX_BYTES)
+
+    assert path.read_text() == "short\n"
+    assert not supervise.previous_log(path).exists()
+
+
+def test_cmd_logs_spans_the_rotation_boundary(
+    sandbox: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = sandbox / "projects" / "thing"
+    path = supervise.log_path(repo)
+    supervise.previous_log(path).write_text("[10:00:00] Session failed: cse_01OLD\n")
+    path.write_text("[19:15:36] Session failed: cse_01NEW\n")
+
+    assert cli.cmd_logs(str(repo), 50, verbatim=False) == 0
+
+    out = capsys.readouterr().out
+    assert "cse_01OLD" in out, "history retired by a rotation is still history"
+    assert out.rstrip().endswith("cse_01NEW")

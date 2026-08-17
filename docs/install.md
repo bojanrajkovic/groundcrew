@@ -67,6 +67,13 @@ removes the control codes and the redrawn lines, which is what makes entries
 like `Session failed:` and `Environment preserved.` findable at all. Use
 `--raw` when the escape sequences themselves are what you need.
 
+A log past 2 MB is retired to `<repo-path>.log.1` at the next spawn, replacing
+whatever generation was there. `groundcrew logs` reads both, so a rotation
+does not hide the history around it. Rotation happens only at spawn, because
+a live supervisor holds the file open and renaming it would leave that process
+writing where no reader can follow; the nightly `claude update` restarts the
+fleet on version drift, which is what gives the check its cadence.
+
 ## macOS (launchd)
 
 Setup uses the two templates in `launchd/`: a LaunchAgent plist and a

@@ -177,8 +177,13 @@ def cmd_logs(raw: str, lines: int, *, verbatim: bool) -> int:
         print(f"no supervisor log for {repo} — has it ever been spawned?", file=sys.stderr)
         return 1
     # Deduplication needs the whole file anyway: what a tail would cut is the
-    # first sighting of a line the visible frames go on repeating.
-    text = path.read_text(errors="replace")
+    # first sighting of a line the visible frames go on repeating. Read the
+    # retired generation first, or a spawn that just rotated would answer for
+    # the fleet's whole history with whatever the new supervisor has said.
+    retired = supervise.previous_log(path)
+    text = (retired.read_text(errors="replace") if retired.exists() else "") + path.read_text(
+        errors="replace"
+    )
     body = text.splitlines() if verbatim else list(supervise.readable_log(text))
     for line in body[-lines:]:
         print(line)
