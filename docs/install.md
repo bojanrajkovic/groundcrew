@@ -54,6 +54,19 @@ Supervisor output is separate. Each `claude remote-control` child writes to
 records out of the daemon's journal, where the volume would trip journald's
 per-unit rate limit and drop the daemon's lines with it.
 
+```sh
+groundcrew logs ~/Projects/thing          # last 50 lines, readable
+groundcrew logs ~/Projects/thing -n 200
+groundcrew logs ~/Projects/thing --raw    # the bytes as written
+```
+
+The child draws an interactive status pane and repaints it whenever capacity
+or a session changes. A terminal overwrites the old frame; a file keeps it, so
+the raw log is overwhelmingly stacked copies of one screen. `groundcrew logs`
+removes the control codes and the redrawn lines, which is what makes entries
+like `Session failed:` and `Environment preserved.` findable at all. Use
+`--raw` when the escape sequences themselves are what you need.
+
 ## macOS (launchd)
 
 Setup uses the two templates in `launchd/`: a LaunchAgent plist and a

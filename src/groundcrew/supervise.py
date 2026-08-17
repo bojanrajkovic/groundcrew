@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import enum
 import os
+import re
 import signal
 import subprocess
 import time
@@ -85,6 +86,43 @@ def log_path(repo: Path) -> Path:
     logs = state_dir() / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     return logs / (str(repo).strip("/").replace("/", "-") + ".log")
+
+
+# `claude remote-control` draws an interactive status pane and repaints it on
+# every change. On a terminal each frame overwrites the last; appended to a
+# file, every repaint is kept, so the log is a stack of near-identical frames.
+_CSI = r"\x1b\[[0-9;?]*[ -/]*[@-~]"  # cursor moves and erases: the repaint itself
+_OSC = r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # hyperlink wrappers; the label survives
+_ESCAPES = re.compile(f"{_CSI}|{_OSC}")
+
+# One frame is a handful of lines, so a line recurring within a window this
+# size is the pane redrawn rather than the same event happening twice.
+FRAME_WINDOW = 40
+
+
+def readable_log(text: str) -> Iterator[str]:
+    """Strip the repaint control codes and drop lines the pane merely redrew.
+
+    Recency, not adjacency: the frame is a repeating cycle of lines, so
+    consecutive-duplicate collapsing would keep every copy of all of them.
+
+    The window counts lines read, not lines kept. A frame collapses to a few
+    survivors, so a window over the output would barely advance while hundreds
+    of repaints scrolled past, and the second occurrence of a real event —
+    a session failing the same way twice — would be swallowed as a redraw.
+    """
+    last_seen: dict[str, int] = {}
+    for position, raw in enumerate(text.splitlines()):
+        line = _ESCAPES.sub("", raw).rstrip()
+        if not line:
+            continue
+        previous = last_seen.get(line)
+        # Refresh on every sighting, including skipped ones: while the pane
+        # keeps redrawing a line, it has not scrolled away and must stay quiet.
+        last_seen[line] = position
+        if previous is not None and position - previous <= FRAME_WINDOW:
+            continue
+        yield line
 
 
 def spawn(repo: Path, version: str | None, settings: RepoSettings, binary: Path) -> Supervisor:
