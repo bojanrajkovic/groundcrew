@@ -27,7 +27,7 @@ empirically against Claude Code 2.1.x before groundcrew was built.
 
 Because remote-control engines never populate the session `status` field,
 busy/idle is inferred: a repo is restartable once every one of its sessions has
-had no transcript writes for 15 minutes.
+had no transcript writes for the quiet window (15 minutes by default).
 
 ## Inside the daemon
 
@@ -54,9 +54,10 @@ tested against real substrate (git repos, processes, scripts).
 Spawns are rate-limited to a few per reconcile pass: registering many
 environments at once trips the API's 429 rate limit and the rejected
 supervisors exit. Cold starts, mass restarts, and fleet-wide drift updates all
-ramp through this gate. Supervisors always run the native installer's binary
-(`~/.local/bin/claude`), never a PATH/shim lookup — a repo's mise config may
-pin its own `claude`, which must not become the supervisor.
+ramp through this gate. Supervisors all run the one binary configured as
+`[claude].bin` (default: the native installer's `~/.local/bin/claude`), never
+a PATH/shim lookup — a repo's mise config may pin its own `claude`, which
+must not become the supervisor.
 
 **Drift** covers both the binary version and the launch arguments. Each
 supervisor's argv is derived from its repo's effective settings with defaults
@@ -93,7 +94,7 @@ CLI's platform-specific `procStart` value.
 - Worktree sessions spawn from the repo's current HEAD, not the default
   branch — keep repos parked on their default branch; `status` warns when one
   isn't.
-- A session doing a >15-minute silent tool run can be mistaken for idle and
+- A session silently running a tool for longer than the quiet window can be mistaken for idle and
   restarted; the conversation resumes and dirty files survive, but that turn's
   remaining work is lost.
 - Resume after SIGKILL is untested; groundcrew always tries SIGTERM first and
