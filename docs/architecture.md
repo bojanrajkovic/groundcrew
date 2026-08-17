@@ -29,6 +29,20 @@ Because remote-control engines never populate the session `status` field,
 busy/idle is inferred: a repo is restartable once every one of its sessions has
 had no transcript writes for 15 minutes.
 
+## Inside the daemon
+
+The supervision core is a functional core in an imperative shell (ADR 0004).
+Each registered repository is a **supervised repo** entity whose methods take
+world observations as values — a pull outcome, a quiet flag, a probed
+version — and return decisions as values (spawn, restart, run-hook, alert);
+the entity's own bookkeeping (warnings, crash history, pull counters) is its
+only mutation. The daemon is the shell: it performs effects and
+observations, feeds outcomes back in, and executes the decisions it is
+handed. Fleet policy lives in the shell — the spawn ramp throttles the
+*execution* of spawn decisions, and the nightly update and rollout tracking
+span repos. Behavior is tested as values in / values out; the plumbing is
+tested against real substrate (git repos, processes, scripts).
+
 ## The loop
 
 | Cadence | Work |

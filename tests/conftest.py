@@ -49,3 +49,15 @@ def add_origin_commit(origin: Path, filename: str = "new.txt") -> None:
     (origin / filename).write_text("more\n")
     git(origin, "add", ".")
     git(origin, "commit", "-qm", f"add {filename}")
+
+
+def script(path: Path, body: str) -> Path:
+    path.write_text(f"#!/bin/sh\n{body}\n")
+    path.chmod(0o755)
+    return path
+
+
+def write_config(sandbox: Path, body: str) -> None:
+    cfg_dir = sandbox / "config"
+    cfg_dir.mkdir(exist_ok=True)
+    (cfg_dir / "config.toml").write_text(body)

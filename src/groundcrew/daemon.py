@@ -1,7 +1,7 @@
-"""The daemon: supervise the fleet, tick hourly, update nightly.
+"""The daemon: the imperative shell around the supervised repo entities.
 
 Loop shape:
-- every POLL_SECONDS: reconcile supervisors against the registry (spawn missing,
+- every POLL_SECONDS: reconcile the fleet against the registry (spawn missing,
   respawn dead with crash-loop backoff, retire unregistered when quiet), then
   persist a state snapshot for `groundcrew status`.
 - every TICK_SECONDS: per repo — freshness pull, the post-pull hook when the
@@ -9,8 +9,14 @@ Loop shape:
   repo has been transcript-quiet for QUIET_SECONDS.
 - nightly at NIGHTLY_HOUR: `claude update` as a backstop for the auto-updater.
 
-The daemon exits without touching its children (systemd KillMode=process); a new
-instance re-adopts them from the process table.
+Per ADR 0004 the shell performs effects and observations; every decision
+belongs to SupervisedRepo, which consumes observations as values and answers
+with decision values this module executes. Fleet-wide policy stays here: the
+spawn ramp throttles the execution of Spawn decisions, and the nightly update
+and rollout tracking span repos.
+
+The daemon exits without touching its children (systemd KillMode=process); a
+new instance re-adopts them from the process table.
 """
 
 from __future__ import annotations
@@ -21,7 +27,6 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType
 
@@ -32,14 +37,22 @@ from groundcrew.config import (
     MAX_SPAWNS_PER_PASS,
     NOTIFY_TIMEOUT,
     POLL_SECONDS,
-    PULL_FAILURES_BEFORE_ALERT,
     UPDATE_TIMEOUT,
     Config,
     atomic_write,
     load_registry,
     state_dir,
 )
-from groundcrew.supervise import RepoState, WarningKind
+from groundcrew.supervise import (
+    Alert,
+    Fresh,
+    Plan,
+    RepoState,
+    Restart,
+    Retire,
+    RunHook,
+    SupervisedRepo,
+)
 
 log = logging.getLogger("groundcrew")
 
@@ -117,27 +130,23 @@ class FleetState(BaseModel):
     repos: dict[str, RepoState]
 
 
-@dataclass
-class RepoRuntime:
-    supervisor: supervise.Supervisor | None = None
-    crashes: supervise.CrashTracker = field(default_factory=supervise.CrashTracker)
-    pull_failures: int = 0
-    pull_alerted: bool = False
-    last_pull_at: float = 0.0
-    last_pull_kind: str = ""
-    last_pull_detail: str = ""
-    warnings: dict[WarningKind, str] = field(default_factory=dict)
-
-
 class Daemon:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.runtimes: dict[Path, RepoRuntime] = {}
+        self.fleet: dict[Path, SupervisedRepo] = {}
         self.stop = threading.Event()
         self.binary_version: str | None = None
         self.pending_rollout: str | None = None
         self.last_update_result = ""
         self.unregistered: list[str] = []
+
+    def repo(self, path: Path) -> SupervisedRepo:
+        if path not in self.fleet:
+            self.fleet[path] = SupervisedRepo(path=path, settings=self.cfg.for_repo(path))
+        return self.fleet[path]
+
+    def alert(self, a: Alert) -> None:
+        notify(self.cfg.notify_command, a.title, a.message)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -145,14 +154,14 @@ class Daemon:
         signal.signal(signal.SIGTERM, self._on_signal)
         signal.signal(signal.SIGINT, self._on_signal)
         registry = load_registry()
-        for repo, sup in supervise.find_orphans(self.cfg.root, registry).items():
-            self.runtimes.setdefault(repo, RepoRuntime()).supervisor = sup
-            log.info("adopted supervisor pid=%d for %s", sup.pid, repo)
+        for path, sup in supervise.find_orphans(self.cfg.root, registry).items():
+            self.repo(path).supervisor = sup
+            log.info("adopted supervisor pid=%d for %s", sup.pid, path)
         self.binary_version = claude_state.binary_version(self.cfg.claude_bin)
         log.info(
             "groundcrew up: %d repos registered, %d supervisors adopted, claude %s",
             len(registry),
-            sum(1 for r in self.runtimes.values() if r.supervisor),
+            sum(1 for sr in self.fleet.values() if sr.supervisor),
             self.binary_version,
         )
         tick_due = 0.0  # first tick immediately
@@ -178,7 +187,7 @@ class Daemon:
             except Exception:
                 log.exception("daemon loop iteration failed; continuing")
             self.stop.wait(POLL_SECONDS)
-        running = sum(1 for r in self.runtimes.values() if r.supervisor)
+        running = sum(1 for sr in self.fleet.values() if sr.supervisor)
         log.info("stopping; leaving %d supervisors running for re-adoption", running)
         self.write_state(load_registry())
 
@@ -191,79 +200,66 @@ class Daemon:
     def reconcile(self, registry: list[Path], now: float) -> None:
         trusted = claude_state.trusted_paths()
         spawned_this_pass = 0
-        for repo in registry:
-            rt = self.runtimes.setdefault(repo, RepoRuntime())
-            rt.warnings.pop(WarningKind.UNTRUSTED, None)
-            rt.warnings.pop(WarningKind.MISSING, None)
-            if not repo.is_dir():
-                rt.warnings[WarningKind.MISSING] = "missing: directory does not exist"
+        for path in registry:
+            sr = self.repo(path)
+            alive = sr.supervisor is not None and sr.supervisor.alive()
+            if sr.supervisor is not None and not alive:
+                log.warning("supervisor for %s died (pid=%d)", path, sr.supervisor.pid)
+            decision = sr.plan_supervision(
+                now, present=path.is_dir(), trusted=str(path) in trusted, alive=alive
+            )
+            if isinstance(decision, Alert):
+                log.error("crash loop for %s; backing off", path)
+                self.alert(decision)
                 continue
-            if rt.supervisor is not None and rt.supervisor.alive():
-                continue
-            if rt.supervisor is not None:
-                log.warning("supervisor for %s died (pid=%d)", repo, rt.supervisor.pid)
-                rt.supervisor = None
-                if rt.crashes.record(now):
-                    log.error("crash loop for %s; backing off", repo)
-                    notify(
-                        self.cfg.notify_command,
-                        "groundcrew: crash loop",
-                        f"{repo.name} supervisor crash-looping; backing off",
-                    )
-            if rt.crashes.in_backoff(now):
-                continue
-            if str(repo) not in trusted:
-                rt.warnings[WarningKind.UNTRUSTED] = (
-                    "untrusted: run `groundcrew add` to seed workspace trust"
-                )
+            if decision is not Plan.SPAWN:
                 continue
             if spawned_this_pass >= MAX_SPAWNS_PER_PASS:
                 continue  # ramp: the rest spawn on the next pass, 30s from now
             try:
-                rt.supervisor = supervise.spawn(
-                    repo, self.binary_version, self.cfg.for_repo(repo), self.cfg.claude_bin
+                sr.supervisor = supervise.spawn(
+                    path, self.binary_version, sr.settings, self.cfg.claude_bin
                 )
             except OSError:
-                log.exception("could not spawn supervisor for %s", repo)
+                log.exception("could not spawn supervisor for %s", path)
                 continue
             spawned_this_pass += 1
-            log.info("spawned supervisor pid=%d for %s", rt.supervisor.pid, repo)
+            log.info("spawned supervisor pid=%d for %s", sr.supervisor.pid, path)
         self.retire_unregistered(registry, now)
 
     def retire_unregistered(self, registry: list[Path], now: float) -> None:
-        # Entries are kept (supervisor=None) rather than deleted so a repo that
+        # Entities are kept (supervisor=None) rather than deleted so a repo that
         # is removed and re-added keeps its crash-tracker history.
-        for repo, rt in self.runtimes.items():
-            if repo in registry:
+        for path, sr in self.fleet.items():
+            if path in registry or sr.supervisor is None:
                 continue
-            sup = rt.supervisor
-            if sup is None:
-                continue
-            if not sup.alive():
-                rt.supervisor = None
-                continue
-            if claude_state.repo_quiet(repo, self.cfg.quiet_seconds, now):
-                log.info("retiring supervisor for unregistered %s", repo)
-                supervise.terminate(sup)
-                rt.supervisor = None
+            alive = sr.supervisor.alive()
+            quiet = alive and claude_state.repo_quiet(path, self.cfg.quiet_seconds, now)
+            decision = sr.plan_retirement(alive=alive, quiet=quiet)
+            if decision is Retire.FORGET:
+                sr.supervisor = None
+            elif decision is Retire.TERMINATE:
+                log.info("retiring supervisor for unregistered %s", path)
+                supervise.terminate(sr.supervisor)
+                sr.supervisor = None
 
     # -- hourly tick -------------------------------------------------------
 
     def tick(self, registry: list[Path], now: float) -> None:
         self.refresh_binary_version()
         sessions = claude_state.live_sessions()
-        for repo in registry:
-            rt = self.runtimes.setdefault(repo, RepoRuntime())
-            if not repo.is_dir():
+        for path in registry:
+            sr = self.repo(path)
+            if not path.is_dir():
                 continue
             try:
-                self.pull_repo(repo, rt, now)
+                self.freshen(path, sr, now)
             except Exception:
-                log.exception("pull failed unexpectedly for %s", repo)
+                log.exception("pull failed unexpectedly for %s", path)
             try:
-                self.maybe_restart_for_drift(repo, rt, sessions)
+                self.converge(path, sr, sessions)
             except Exception:
-                log.exception("drift check failed for %s", repo)
+                log.exception("drift check failed for %s", path)
         self.check_rollout_complete()
         # Discovery is a filesystem sweep; hourly freshness is plenty for a
         # status hint, so it lives here rather than on every 30 s state write.
@@ -277,131 +273,79 @@ class Daemon:
                 self.pending_rollout = version
             self.binary_version = version
 
-    def pull_repo(self, repo: Path, rt: RepoRuntime, now: float) -> None:
-        for kind in (
-            WarningKind.PARKED,
-            WarningKind.DIRTY,
-            WarningKind.DIVERGED,
-            WarningKind.PULL,
-            WarningKind.POST_PULL,
-            WarningKind.DEFERRED,
-        ):
-            rt.warnings.pop(kind, None)
-        if self.cfg.for_repo(repo).spawn == "same-dir":
-            live = claude_state.repo_sessions(repo)
-            if live:
-                # All same-dir sessions share the repo's working tree, so a
-                # pull would race their edits; quiet is not enough here.
-                rt.warnings[WarningKind.DEFERRED] = (
-                    f"deferred: pull skipped, {len(live)} live session(s) share the working tree"
-                )
-                return
-        outcome = gitops.pull(repo)
-        rt.last_pull_at = now
-        rt.last_pull_kind = outcome.kind.value
-        rt.last_pull_detail = outcome.detail
-        if outcome.parked:
-            rt.warnings[WarningKind.PARKED] = (
-                "parked: checkout is not on the default branch; spawns base on HEAD"
-            )
-        if outcome.kind is gitops.PullKind.FETCHED_DIRTY:
-            rt.warnings[WarningKind.DIRTY] = f"dirty: {outcome.detail}"
-        if outcome.kind is gitops.PullKind.DIVERGED:
-            # A repo state needing a human; not an infrastructure failure, so it
-            # neither counts toward nor masks the consecutive-failure alert.
-            rt.warnings[WarningKind.DIVERGED] = f"diverged: {outcome.detail}"
+    def freshen(self, path: Path, sr: SupervisedRepo, now: float) -> None:
+        # Only same-dir entities decide on session presence; skip the read otherwise.
+        count = len(claude_state.repo_sessions(path)) if sr.settings.spawn == "same-dir" else 0
+        if sr.plan_freshness(session_count=count) is Fresh.SKIP:
             return
-        if outcome.kind is gitops.PullKind.FAILED:
-            rt.pull_failures += 1
-            rt.warnings[WarningKind.PULL] = f"pull failing x{rt.pull_failures}: {outcome.detail}"
-            log.warning(
-                "pull failed for %s (%d consecutive): %s", repo, rt.pull_failures, outcome.detail
-            )
-            if rt.pull_failures >= PULL_FAILURES_BEFORE_ALERT and not rt.pull_alerted:
-                rt.pull_alerted = True
-                notify(
-                    self.cfg.notify_command,
-                    "groundcrew: pull failing",
-                    f"{repo.name}: {outcome.detail}",
-                )
+        outcome = gitops.pull(path)
+        decision = sr.on_pull(outcome, now)
+        if isinstance(decision, Alert):
+            log.warning("pull failing for %s: %s", path, outcome.detail)
+            self.alert(decision)
             return
-        rt.pull_failures = 0
-        rt.pull_alerted = False
-        if outcome.moved and not outcome.parked:
-            # Parked repos get ref-only updates; the working tree didn't change,
-            # so refreshing its toolchain would act on a tree the pull never touched.
-            log.info("%s: %s (default branch moved)", repo.name, outcome.kind.value)
-            self.run_post_pull(repo, rt)
+        if isinstance(decision, RunHook):
+            log.info("%s: %s (default branch moved)", path.name, outcome.kind.value)
+            error = self.run_hook(path, decision.command)
+            hook_alert = sr.on_hook_result(error)
+            if hook_alert is not None:
+                log.warning("post_pull failed for %s: %s", path, error)
+                self.alert(hook_alert)
 
-    def run_post_pull(self, repo: Path, rt: RepoRuntime) -> None:
-        command = self.cfg.for_repo(repo).post_pull
-        if not command:
-            return
+    def run_hook(self, path: Path, command: tuple[str, ...]) -> str | None:
+        """Execute a post-pull hook; the error summary is the observation fed back."""
         try:
             result = subprocess.run(
                 command,
-                cwd=repo,
+                cwd=path,
                 capture_output=True,
                 text=True,
                 timeout=self.cfg.post_pull_timeout,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            result = None
-            detail = str(exc)
-        if result is not None and result.returncode == 0:
-            return
-        detail = detail if result is None else (gitops.summarize(result.stderr) or "non-zero exit")
-        rt.warnings[WarningKind.POST_PULL] = f"post_pull failed: {detail}"
-        log.warning("post_pull failed for %s: %s", repo, detail)
-        notify(self.cfg.notify_command, "groundcrew: post_pull failed", f"{repo.name}: {detail}")
+            return str(exc)
+        if result.returncode == 0:
+            return None
+        return gitops.summarize(result.stderr) or "non-zero exit"
 
-    def maybe_restart_for_drift(
-        self,
-        repo: Path,
-        rt: RepoRuntime,
-        sessions: list[claude_state.SessionInfo],
+    def converge(
+        self, path: Path, sr: SupervisedRepo, sessions: list[claude_state.SessionInfo]
     ) -> None:
-        rt.warnings.pop(WarningKind.DRIFT, None)
-        sup = rt.supervisor
-        if sup is None or self.binary_version is None or not sup.alive():
+        sup = sr.supervisor
+        if sup is None or not sup.alive():
             return
+        probed = None
         if sup.launched_version is None:
-            sup.launched_version = claude_state.process_version(sup.pid) or next(
-                (s.version for s in claude_state.rc_sessions_for(repo, sessions) if s.version),
+            probed = claude_state.process_version(sup.pid) or next(
+                (s.version for s in claude_state.rc_sessions_for(path, sessions) if s.version),
                 None,
             )
-        reasons = []
-        if sup.launched_version != self.binary_version:
-            reasons.append(f"version {sup.launched_version} -> {self.binary_version}")
-        if sup.launched_args != supervise.rc_args(self.cfg.for_repo(repo)):
-            reasons.append("args")
-        if not reasons:
+        quiet = claude_state.repo_quiet(path, self.cfg.quiet_seconds, time.time())
+        decision = sr.plan_drift(self.binary_version, probed, quiet=quiet)
+        if decision is None:
             return
-        reason = " + ".join(reasons)
-        if not claude_state.repo_quiet(repo, self.cfg.quiet_seconds, time.time()):
-            rt.warnings[WarningKind.DRIFT] = (
-                f"drift ({reason}): restart deferred, session(s) active"
-            )
-            log.info("%s drifted (%s) but session(s) active; deferring", repo.name, reason)
-            return
-        log.info("stopping %s for drift (%s); ramp respawns it", repo.name, reason)
-        if not supervise.terminate(sup):
-            log.error("could not stop supervisor pid=%d for %s", sup.pid, repo)
-            return
-        # Respawn happens via reconcile's spawn ramp so a fleet-wide update
-        # cannot stampede the registration rate limit.
-        rt.supervisor = None
+        if isinstance(decision, Restart):
+            log.info("stopping %s for drift (%s); ramp respawns it", path.name, decision.reason)
+            if not supervise.terminate(sup):
+                log.error("could not stop supervisor pid=%d for %s", sup.pid, path)
+                return
+            # Respawn happens via reconcile's spawn ramp so a fleet-wide update
+            # cannot stampede the registration rate limit.
+            sr.supervisor = None
+        else:
+            log.info("%s drifted (%s) but session(s) active; deferring", path.name, decision.reason)
 
     def check_rollout_complete(self) -> None:
         if self.pending_rollout is None or self.pending_rollout != self.binary_version:
             return
-        fleet = [rt.supervisor for rt in self.runtimes.values() if rt.supervisor is not None]
+        fleet = [sr.supervisor for sr in self.fleet.values() if sr.supervisor is not None]
         if fleet and all(s.launched_version == self.pending_rollout for s in fleet):
-            notify(
-                self.cfg.notify_command,
-                "groundcrew: fleet updated",
-                f"all {len(fleet)} supervisors now on claude {self.pending_rollout}",
+            self.alert(
+                Alert(
+                    "groundcrew: fleet updated",
+                    f"all {len(fleet)} supervisors now on claude {self.pending_rollout}",
+                )
             )
             self.pending_rollout = None
 
@@ -419,34 +363,23 @@ class Daemon:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             self.last_update_result = f"failed: {exc}"
-            notify(self.cfg.notify_command, "groundcrew: claude update failed", str(exc))
+            self.alert(Alert("groundcrew: claude update failed", str(exc)))
             return
         tail = (result.stdout + result.stderr).strip()[-300:]
         self.last_update_result = f"exit {result.returncode}: {tail}"
         if result.returncode != 0:
-            notify(self.cfg.notify_command, "groundcrew: claude update failed", tail)
+            self.alert(Alert("groundcrew: claude update failed", tail))
         self.refresh_binary_version()
 
     # -- state snapshot ----------------------------------------------------
 
     def write_state(self, registry: list[Path]) -> None:
-        repos: dict[str, RepoState] = {}
-        for repo, rt in self.runtimes.items():
-            if repo not in registry and rt.supervisor is None:
-                continue  # fully retired; keep runtime for crash history, not for status
-            sup = rt.supervisor
-            repos[str(repo)] = RepoState(
-                pid=sup.pid if sup else None,
-                created=sup.created if sup else None,
-                version=sup.launched_version if sup else None,
-                spawned_at=sup.spawned_at if sup else None,
-                last_pull_at=rt.last_pull_at,
-                last_pull_kind=rt.last_pull_kind,
-                last_pull_detail=rt.last_pull_detail,
-                pull_failures=rt.pull_failures,
-                backoff_until=rt.crashes.backoff_until,
-                warnings=list(rt.warnings.values()),
-            )
+        repos = {
+            str(path): sr.to_state()
+            for path, sr in self.fleet.items()
+            # fully retired entities keep their crash history but leave status
+            if path in registry or sr.supervisor is not None
+        }
         state = FleetState(
             updated_at=time.time(),
             binary_version=self.binary_version,

@@ -4,14 +4,9 @@ import json
 from pathlib import Path
 
 import pytest
+from conftest import write_config
 
 from groundcrew import cli, config
-
-
-def write_config(sandbox: Path, body: str) -> None:
-    cfg_dir = sandbox / "config"
-    cfg_dir.mkdir(exist_ok=True)
-    (cfg_dir / "config.toml").write_text(body)
 
 
 def test_no_file_means_current_behavior(sandbox: Path) -> None:

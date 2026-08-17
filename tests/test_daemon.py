@@ -6,24 +6,14 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from conftest import add_origin_commit, clone, git, make_repo
+from conftest import add_origin_commit, clone, make_repo, script, write_config
 
-from groundcrew import claude_state, cli, config, gitops, supervise
-from groundcrew import daemon as daemon_mod
-from groundcrew.daemon import (
-    Daemon,
-    RepoRuntime,
-    discover_unregistered,
-    next_nightly,
-    notify,
-)
+from groundcrew import claude_state, cli, config, supervise
+from groundcrew.config import RepoSettings
+from groundcrew.daemon import Daemon, discover_unregistered, next_nightly, notify
 from groundcrew.supervise import CrashTracker, WarningKind
 
-
-def script(path: Path, body: str) -> Path:
-    path.write_text(f"#!/bin/sh\n{body}\n")
-    path.chmod(0o755)
-    return path
+# ── the notifier contract ───────────────────────────────────────────────────
 
 
 def test_notify_passes_title_and_message_as_argv_and_env(sandbox: Path) -> None:
@@ -63,175 +53,114 @@ def test_notify_unconfigured_suppressed(caplog: pytest.LogCaptureFixture) -> Non
     assert "suppressed" in caplog.text
 
 
-def hook_fixture(sandbox: Path, hook_body: str, extra_config: str = "") -> tuple[Path, Path]:
-    """An origin+clone pair with a fresh origin commit and a configured hook."""
+# ── shell end-to-end: freshness through real git, hooks, and notifier ───────
+
+
+def test_freshen_runs_hook_in_repo_after_branch_move(sandbox: Path) -> None:
     root = sandbox / "projects"
     origin = make_repo(root / "origin")
     repo = clone(origin, root / "repo")
     add_origin_commit(origin)
-    hook = script(sandbox / "hook", hook_body)
-    cfg_dir = sandbox / "config"
-    cfg_dir.mkdir(exist_ok=True)
-    (cfg_dir / "config.toml").write_text(f'[hooks]\npost_pull = ["{hook}"]\n{extra_config}')
-    return repo, sandbox / "hook-ran"
+    marker = sandbox / "hook-ran"
+    hook = script(sandbox / "hook", f"pwd > {marker}")
+    write_config(sandbox, f'[hooks]\npost_pull = ["{hook}"]\n')
+    daemon = Daemon(config.load())
 
-
-def test_post_pull_runs_in_repo_after_branch_move(sandbox: Path) -> None:
-    repo, marker = hook_fixture(sandbox, f"pwd > {sandbox / 'hook-ran'}")
-
-    Daemon(config.load()).pull_repo(repo, RepoRuntime(), time.time())
+    daemon.freshen(repo, daemon.repo(repo), time.time())
 
     assert marker.read_text().strip() == str(repo)
 
 
-def test_post_pull_skipped_for_parked_repo(sandbox: Path) -> None:
-    repo, marker = hook_fixture(sandbox, f"pwd > {sandbox / 'hook-ran'}")
-    git(repo, "checkout", "-q", "-b", "parked-branch")
-    rt = RepoRuntime()
-
-    Daemon(config.load()).pull_repo(repo, rt, time.time())
-
-    assert not marker.exists()
-    assert WarningKind.PARKED in rt.warnings
-
-
-def test_post_pull_empty_override_disables(sandbox: Path) -> None:
-    repo, marker = hook_fixture(sandbox, f"pwd > {sandbox / 'hook-ran'}")
-    cfg_path = sandbox / "config" / "config.toml"
-    cfg_path.write_text(cfg_path.read_text() + f'\n[repos."{repo}"]\npost_pull = []\n')
-
-    Daemon(config.load()).pull_repo(repo, RepoRuntime(), time.time())
-
-    assert not marker.exists()
-
-
-def test_post_pull_failure_warns_and_notifies(
-    sandbox: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo, _ = hook_fixture(sandbox, "echo kaboom >&2\nexit 1")
-    sent: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        daemon_mod, "notify", lambda _cmd, title, message, **_kw: sent.append((title, message))
+def test_freshen_hook_failure_reaches_the_real_notifier(sandbox: Path) -> None:
+    root = sandbox / "projects"
+    origin = make_repo(root / "origin")
+    repo = clone(origin, root / "repo")
+    add_origin_commit(origin)
+    hook = script(sandbox / "hook", "echo kaboom >&2\nexit 1")
+    sent = sandbox / "sent.txt"
+    notifier = script(sandbox / "notifier", f'echo "$1|$2" > {sent}')
+    write_config(
+        sandbox,
+        f'[notify]\ncommand = ["{notifier}"]\n\n[hooks]\npost_pull = ["{hook}"]\n',
     )
-    rt = RepoRuntime()
-
-    Daemon(config.load()).pull_repo(repo, rt, time.time())
-
-    assert WarningKind.POST_PULL in rt.warnings
-    assert sent
-    assert "kaboom" in sent[0][1]
-
-
-def live_supervisor(repo: Path, args: tuple[str, ...], version: str) -> supervise.Supervisor:
-    """A Supervisor wearing this test process's PID, so alive() is True."""
-    pid = os.getpid()
-    created = claude_state.proc_create_time(pid)
-    assert created is not None
-    return supervise.Supervisor(
-        repo=repo,
-        pid=pid,
-        created=created,
-        launched_version=version,
-        launched_args=args,
-        spawned_at=0.0,
-    )
-
-
-def rc_session(repo: Path, started_at: float) -> claude_state.SessionInfo:
-    return claude_state.SessionInfo(
-        pid=os.getpid(),
-        session_id="test-session",
-        cwd=repo / "sub",
-        started_at=started_at,
-        version="1.0.0",
-        entrypoint="sdk-cli",
-    )
-
-
-def test_args_drift_restarts_quiet_supervisor(
-    sandbox: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
     daemon = Daemon(config.load())
-    daemon.binary_version = "1.0.0"
-    repo = sandbox / "projects" / "repo"
-    repo.mkdir()
-    rt = RepoRuntime()
-    rt.supervisor = live_supervisor(repo, ("remote-control", "--old-shape"), "1.0.0")
-    killed: list[supervise.Supervisor] = []
+    sr = daemon.repo(repo)
 
-    def fake_terminate(sup: supervise.Supervisor) -> bool:
-        killed.append(sup)
-        return True
+    daemon.freshen(repo, sr, time.time())
 
-    monkeypatch.setattr(supervise, "terminate", fake_terminate)
-
-    daemon.maybe_restart_for_drift(repo, rt, [])
-
-    assert killed
-    assert rt.supervisor is None
+    assert "post_pull failed" in sent.read_text()
+    assert "kaboom" in sent.read_text()
+    assert WarningKind.POST_PULL in sr.warnings
 
 
-def test_matching_version_and_args_do_not_restart(
-    sandbox: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cfg = config.load()
-    daemon = Daemon(cfg)
-    daemon.binary_version = "1.0.0"
-    repo = sandbox / "projects" / "repo"
-    repo.mkdir()
-    rt = RepoRuntime()
-    rt.supervisor = live_supervisor(repo, supervise.rc_args(cfg.for_repo(repo)), "1.0.0")
-    monkeypatch.setattr(supervise, "terminate", lambda _sup: pytest.fail("must not terminate"))
-
-    daemon.maybe_restart_for_drift(repo, rt, [])
-
-    assert rt.supervisor is not None
+# ── shell end-to-end: the spawn ramp with real processes ────────────────────
 
 
-def test_drift_deferred_while_sessions_active(
-    sandbox: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_reconcile_ramps_spawns_across_passes(sandbox: Path) -> None:
+    fake_claude = script(sandbox / "fake-claude", "exec sleep 30")
+    write_config(sandbox, f'[claude]\nbin = "{fake_claude}"\n')
+    registry = []
+    for i in range(5):
+        repo = sandbox / "projects" / f"repo{i}"
+        repo.mkdir()
+        registry.append(repo)
+    (sandbox / "claude.json").write_text("{}")
+    claude_state.seed_trust(registry)
     daemon = Daemon(config.load())
-    daemon.binary_version = "1.0.0"
-    repo = sandbox / "projects" / "repo"
+    try:
+        daemon.reconcile(registry, time.time())
+        up_after_first = sum(1 for sr in daemon.fleet.values() if sr.supervisor)
+
+        daemon.reconcile(registry, time.time())
+        up_after_second = sum(1 for sr in daemon.fleet.values() if sr.supervisor)
+    finally:
+        for sr in daemon.fleet.values():
+            if sr.supervisor and sr.supervisor.handle:
+                sr.supervisor.handle.kill()
+                sr.supervisor.handle.wait()
+
+    assert up_after_first == config.MAX_SPAWNS_PER_PASS
+    assert up_after_second == 5
+
+
+def test_reconcile_skips_untrusted_repos(sandbox: Path) -> None:
+    repo = sandbox / "projects" / "untrusted"
     repo.mkdir()
-    rt = RepoRuntime()
-    rt.supervisor = live_supervisor(repo, ("remote-control", "--old-shape"), "1.0.0")
-    monkeypatch.setattr(claude_state, "live_sessions", lambda: [rc_session(repo, time.time())])
-    monkeypatch.setattr(supervise, "terminate", lambda _sup: pytest.fail("must not terminate"))
-
-    daemon.maybe_restart_for_drift(repo, rt, [])
-
-    assert rt.supervisor is not None
-    assert WarningKind.DRIFT in rt.warnings
-
-    # regression for the old string-prefix protocol: a later pull pass must
-    # not erase another producer's warning — each producer owns its kinds
-    daemon.pull_repo(repo, rt, time.time())
-    assert WarningKind.DRIFT in rt.warnings
-
-    # and the owner clears it once the drift is gone
-    rt.supervisor = live_supervisor(repo, supervise.rc_args(config.load().for_repo(repo)), "1.0.0")
-    daemon.maybe_restart_for_drift(repo, rt, [])
-    assert WarningKind.DRIFT not in rt.warnings
-
-
-def test_same_dir_repo_defers_pull_while_sessions_live(
-    sandbox: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo = sandbox / "projects" / "repo"
-    repo.mkdir()
-    cfg_dir = sandbox / "config"
-    cfg_dir.mkdir(exist_ok=True)
-    (cfg_dir / "config.toml").write_text(f'[repos."{repo}"]\nspawn = "same-dir"\n')
+    (sandbox / "claude.json").write_text("{}")
     daemon = Daemon(config.load())
-    rt = RepoRuntime()
-    monkeypatch.setattr(claude_state, "live_sessions", lambda: [rc_session(repo, time.time())])
-    monkeypatch.setattr(gitops, "pull", lambda _repo: pytest.fail("pull must be skipped"))
 
-    daemon.pull_repo(repo, rt, time.time())
+    daemon.reconcile([repo], time.time())
 
-    assert WarningKind.DEFERRED in rt.warnings
+    sr = daemon.fleet[repo]
+    assert sr.supervisor is None
+    assert WarningKind.UNTRUSTED in sr.warnings
+
+
+# ── shell end-to-end: drift restart terminates a real supervisor ────────────
+
+
+def test_converge_restarts_a_real_drifted_supervisor(sandbox: Path) -> None:
+    fake_claude = script(sandbox / "fake-claude", "exec sleep 30")
+    repo = sandbox / "projects" / "repo"
+    repo.mkdir()
+    daemon = Daemon(config.load())
+    sr = daemon.repo(repo)
+    # launched with default args; entity wants capacity 4 → args drift
+    sr.settings = RepoSettings(capacity=4)
+    sr.supervisor = supervise.spawn(repo, "1.0.0", RepoSettings(), binary=fake_claude)
+    handle = sr.supervisor.handle
+    assert handle is not None
+    daemon.binary_version = "1.0.0"
+
+    daemon.converge(repo, sr, sessions=[])
+
+    # read through the fleet, not the narrowed local, so mypy doesn't
+    # consider the assertion statically false
+    assert daemon.fleet[repo].supervisor is None
+    assert handle.poll() is not None  # the real process is gone
+
+
+# ── snapshot round trip ─────────────────────────────────────────────────────
 
 
 def test_state_round_trips_from_daemon_to_status(
@@ -241,17 +170,30 @@ def test_state_round_trips_from_daemon_to_status(
     daemon = Daemon(cfg)
     repo = sandbox / "projects" / "repo"
     repo.mkdir()
-    rt = daemon.runtimes.setdefault(repo, RepoRuntime())
-    rt.supervisor = live_supervisor(repo, ("remote-control",), "9.9.9")
-    rt.warnings[WarningKind.PARKED] = "parked: test warning"
+    sr = daemon.repo(repo)
+    pid = os.getpid()
+    created = claude_state.proc_create_time(pid)
+    assert created is not None
+    sr.supervisor = supervise.Supervisor(
+        repo=repo,
+        pid=pid,
+        created=created,
+        launched_version="9.9.9",
+        launched_args=("remote-control",),
+        spawned_at=0.0,
+    )
+    sr.warnings[WarningKind.PARKED] = "parked: test warning"
 
     daemon.write_state([repo])
 
     assert cli.cmd_status(cfg) == 0
     out = capsys.readouterr().out
-    assert f"up {os.getpid()}" in out  # liveness via the shared process_is rule
+    assert f"up {pid}" in out  # liveness via the shared process_is rule
     assert "9.9.9" in out
     assert "⚠ parked: test warning" in out
+
+
+# ── registry, discovery, scheduling, crash tracking ─────────────────────────
 
 
 def test_registry_round_trip(sandbox: Path) -> None:
