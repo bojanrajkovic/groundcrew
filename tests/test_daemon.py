@@ -10,7 +10,14 @@ from conftest import add_origin_commit, clone, git, make_repo
 
 from groundcrew import claude_state, config, gitops, supervise
 from groundcrew import daemon as daemon_mod
-from groundcrew.daemon import Daemon, RepoRuntime, discover_unregistered, next_nightly, notify
+from groundcrew.daemon import (
+    Daemon,
+    RepoRuntime,
+    WarningKind,
+    discover_unregistered,
+    next_nightly,
+    notify,
+)
 from groundcrew.supervise import CrashTracker
 
 
@@ -86,7 +93,7 @@ def test_post_pull_skipped_for_parked_repo(sandbox: Path) -> None:
     Daemon(config.load()).pull_repo(repo, rt, time.time())
 
     assert not marker.exists()
-    assert any(w.startswith("parked") for w in rt.warnings)
+    assert WarningKind.PARKED in rt.warnings
 
 
 def test_post_pull_empty_override_disables(sandbox: Path) -> None:
@@ -111,7 +118,7 @@ def test_post_pull_failure_warns_and_notifies(
 
     Daemon(config.load()).pull_repo(repo, rt, time.time())
 
-    assert any(w.startswith("post_pull failed") for w in rt.warnings)
+    assert WarningKind.POST_PULL in rt.warnings
     assert sent
     assert "kaboom" in sent[0][1]
 
@@ -197,7 +204,17 @@ def test_drift_deferred_while_sessions_active(
     daemon.maybe_restart_for_drift(repo, rt, [])
 
     assert rt.supervisor is not None
-    assert any(w.startswith("drift") for w in rt.warnings)
+    assert WarningKind.DRIFT in rt.warnings
+
+    # regression for the old string-prefix protocol: a later pull pass must
+    # not erase another producer's warning — each producer owns its kinds
+    daemon.pull_repo(repo, rt, time.time())
+    assert WarningKind.DRIFT in rt.warnings
+
+    # and the owner clears it once the drift is gone
+    rt.supervisor = live_supervisor(repo, supervise.rc_args(config.load().for_repo(repo)), "1.0.0")
+    daemon.maybe_restart_for_drift(repo, rt, [])
+    assert WarningKind.DRIFT not in rt.warnings
 
 
 def test_same_dir_repo_defers_pull_while_sessions_live(
@@ -215,7 +232,7 @@ def test_same_dir_repo_defers_pull_while_sessions_live(
 
     daemon.pull_repo(repo, rt, time.time())
 
-    assert any(w.startswith("deferred") for w in rt.warnings)
+    assert WarningKind.DEFERRED in rt.warnings
 
 
 def test_registry_round_trip(sandbox: Path) -> None:

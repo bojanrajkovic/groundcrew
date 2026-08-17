@@ -15,6 +15,7 @@ instance re-adopts them from the process table.
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import os
@@ -103,6 +104,26 @@ def discover_unregistered(registry: list[Path], root: Path) -> list[Path]:
     return found
 
 
+class WarningKind(enum.Enum):
+    """Identity and lifecycle key for a repo warning.
+
+    Each kind has exactly one producer, and that producer owns the full
+    lifecycle: it clears its kinds at the top of its pass and sets them for
+    conditions that hold. No function touches another producer's kinds, so
+    warning correctness never depends on call ordering.
+    """
+
+    PARKED = "parked"  # pull_repo
+    DIRTY = "dirty"
+    DIVERGED = "diverged"
+    PULL = "pull"
+    POST_PULL = "post_pull"
+    DEFERRED = "deferred"
+    DRIFT = "drift"  # maybe_restart_for_drift
+    UNTRUSTED = "untrusted"  # reconcile
+    MISSING = "missing"
+
+
 @dataclass
 class RepoRuntime:
     supervisor: supervise.Supervisor | None = None
@@ -112,7 +133,7 @@ class RepoRuntime:
     last_pull_at: float = 0.0
     last_pull_kind: str = ""
     last_pull_detail: str = ""
-    warnings: list[str] = field(default_factory=list)
+    warnings: dict[WarningKind, str] = field(default_factory=dict)
 
 
 class Daemon:
@@ -178,9 +199,10 @@ class Daemon:
         spawned_this_pass = 0
         for repo in registry:
             rt = self.runtimes.setdefault(repo, RepoRuntime())
-            rt.warnings = [w for w in rt.warnings if not w.startswith(("untrusted", "missing"))]
+            rt.warnings.pop(WarningKind.UNTRUSTED, None)
+            rt.warnings.pop(WarningKind.MISSING, None)
             if not repo.is_dir():
-                rt.warnings.append("missing: directory does not exist")
+                rt.warnings[WarningKind.MISSING] = "missing: directory does not exist"
                 continue
             if rt.supervisor is not None and rt.supervisor.alive():
                 continue
@@ -197,7 +219,9 @@ class Daemon:
             if rt.crashes.in_backoff(now):
                 continue
             if str(repo) not in trusted:
-                rt.warnings.append("untrusted: run `groundcrew add` to seed workspace trust")
+                rt.warnings[WarningKind.UNTRUSTED] = (
+                    "untrusted: run `groundcrew add` to seed workspace trust"
+                )
                 continue
             if spawned_this_pass >= MAX_SPAWNS_PER_PASS:
                 continue  # ramp: the rest spawn on the next pass, 30s from now
@@ -257,14 +281,21 @@ class Daemon:
             self.binary_version = version
 
     def pull_repo(self, repo: Path, rt: RepoRuntime, now: float) -> None:
-        pruned = ("parked", "dirty", "pull", "post_pull", "diverged", "deferred", "drift")
-        rt.warnings = [w for w in rt.warnings if not w.startswith(pruned)]
+        for kind in (
+            WarningKind.PARKED,
+            WarningKind.DIRTY,
+            WarningKind.DIVERGED,
+            WarningKind.PULL,
+            WarningKind.POST_PULL,
+            WarningKind.DEFERRED,
+        ):
+            rt.warnings.pop(kind, None)
         if self.cfg.for_repo(repo).spawn == "same-dir":
             live = claude_state.repo_sessions(repo)
             if live:
                 # All same-dir sessions share the repo's working tree, so a
                 # pull would race their edits; quiet is not enough here.
-                rt.warnings.append(
+                rt.warnings[WarningKind.DEFERRED] = (
                     f"deferred: pull skipped, {len(live)} live session(s) share the working tree"
                 )
                 return
@@ -273,17 +304,19 @@ class Daemon:
         rt.last_pull_kind = outcome.kind.value
         rt.last_pull_detail = outcome.detail
         if outcome.parked:
-            rt.warnings.append("parked: checkout is not on the default branch; spawns base on HEAD")
+            rt.warnings[WarningKind.PARKED] = (
+                "parked: checkout is not on the default branch; spawns base on HEAD"
+            )
         if outcome.kind is gitops.PullKind.FETCHED_DIRTY:
-            rt.warnings.append(f"dirty: {outcome.detail}")
+            rt.warnings[WarningKind.DIRTY] = f"dirty: {outcome.detail}"
         if outcome.kind is gitops.PullKind.DIVERGED:
             # A repo state needing a human; not an infrastructure failure, so it
             # neither counts toward nor masks the consecutive-failure alert.
-            rt.warnings.append(f"diverged: {outcome.detail}")
+            rt.warnings[WarningKind.DIVERGED] = f"diverged: {outcome.detail}"
             return
         if outcome.kind is gitops.PullKind.FAILED:
             rt.pull_failures += 1
-            rt.warnings.append(f"pull failing x{rt.pull_failures}: {outcome.detail}")
+            rt.warnings[WarningKind.PULL] = f"pull failing x{rt.pull_failures}: {outcome.detail}"
             log.warning(
                 "pull failed for %s (%d consecutive): %s", repo, rt.pull_failures, outcome.detail
             )
@@ -322,7 +355,7 @@ class Daemon:
         if result is not None and result.returncode == 0:
             return
         detail = detail if result is None else (gitops.summarize(result.stderr) or "non-zero exit")
-        rt.warnings.append(f"post_pull failed: {detail}")
+        rt.warnings[WarningKind.POST_PULL] = f"post_pull failed: {detail}"
         log.warning("post_pull failed for %s: %s", repo, detail)
         notify(self.cfg.notify_command, "groundcrew: post_pull failed", f"{repo.name}: {detail}")
 
@@ -332,6 +365,7 @@ class Daemon:
         rt: RepoRuntime,
         sessions: list[claude_state.SessionInfo],
     ) -> None:
+        rt.warnings.pop(WarningKind.DRIFT, None)
         sup = rt.supervisor
         if sup is None or self.binary_version is None or not sup.alive():
             return
@@ -349,7 +383,9 @@ class Daemon:
             return
         reason = " + ".join(reasons)
         if not claude_state.repo_quiet(repo, self.cfg.quiet_seconds, time.time()):
-            rt.warnings.append(f"drift ({reason}): restart deferred, session(s) active")
+            rt.warnings[WarningKind.DRIFT] = (
+                f"drift ({reason}): restart deferred, session(s) active"
+            )
             log.info("%s drifted (%s) but session(s) active; deferring", repo.name, reason)
             return
         log.info("stopping %s for drift (%s); ramp respawns it", repo.name, reason)
@@ -412,7 +448,7 @@ class Daemon:
                 "last_pull_detail": rt.last_pull_detail,
                 "pull_failures": rt.pull_failures,
                 "backoff_until": rt.crashes.backoff_until,
-                "warnings": rt.warnings,
+                "warnings": list(rt.warnings.values()),
             }
         state = {
             "updated_at": time.time(),
