@@ -119,9 +119,11 @@ def test_quiet_detection_uses_transcript_mtime(sandbox: Path) -> None:
 
 def test_repo_quiet_composes_fresh_session_state(sandbox: Path) -> None:
     repo = sandbox / "projects" / "repo"
-    now = time.time()
     child = subprocess.Popen(["sleep", "30"])
     try:
+        # startedAt must postdate the child's creation, like a real engine's
+        # does — otherwise live_sessions() reads the child as a PID recycler.
+        now = time.time()
         write_session(
             child.pid, "sess-rc", str(repo / "sub"), int(now * 1000), entrypoint="sdk-cli"
         )
