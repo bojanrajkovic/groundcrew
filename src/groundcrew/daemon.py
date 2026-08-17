@@ -29,6 +29,7 @@ import threading
 import time
 from pathlib import Path
 from types import FrameType
+from typing import ClassVar
 
 from pydantic import BaseModel
 
@@ -392,6 +393,43 @@ class Daemon:
         atomic_write(state_dir() / "state.json", state.model_dump_json(indent=2))
 
 
+class JournalPriority(logging.Formatter):
+    """Mark each line with journald's syslog level so `journalctl -p` filters.
+
+    systemd reads a leading `<N>` on a line of stderr as that line's priority
+    and strips it from the stored message. Every line carries the prefix, not
+    just the first: `log.exception` emits a traceback, and its continuation
+    lines would otherwise be filed at the default priority — visible only in
+    an unfiltered read, right where the error that explains them is not.
+    """
+
+    PRIORITY: ClassVar[dict[int, int]] = {
+        logging.CRITICAL: 2,
+        logging.ERROR: 3,
+        logging.WARNING: 4,
+        logging.INFO: 6,
+        logging.DEBUG: 7,
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        prefix = f"<{self.PRIORITY.get(record.levelno, 6)}>"
+        return "\n".join(prefix + line for line in super().format(record).splitlines())
+
+
+def log_handler() -> logging.Handler:
+    """stderr, formatted for whichever sink systemd or launchd attached to it.
+
+    journald stores level and timestamp as record fields, so repeating them in
+    the message is noise; the launchd log file is a flat file that has neither.
+    """
+    handler = logging.StreamHandler()
+    if os.environ.get("JOURNAL_STREAM"):  # set by systemd iff stderr is the journal
+        handler.setFormatter(JournalPriority("%(message)s"))
+    else:
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
+    return handler
+
+
 def run_daemon(cfg: Config) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.basicConfig(level=logging.INFO, handlers=[log_handler()])
     Daemon(cfg).run()
