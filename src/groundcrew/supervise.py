@@ -59,6 +59,9 @@ def rc_args(settings: RepoSettings) -> tuple[str, ...]:
         str(settings.capacity),
         "--permission-mode",
         settings.permission_mode,
+        "--create-session-in-dir"
+        if settings.create_session_in_dir
+        else "--no-create-session-in-dir",
     )
 
 

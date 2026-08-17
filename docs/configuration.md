@@ -25,9 +25,11 @@ restart-preventing (the launchd wrapper converts it to a stop), so a typo
 halts the service instead of restart-looping it.
 
 Supervisor launch settings live in `[claude]` — `spawn`
-(`"worktree"`/`"same-dir"`), `capacity`, `permission_mode` — with per-repo
-overrides in `[repos."<path>"]` tables (any `[claude]` key except `bin`,
-plus `post_pull`). Changing them takes effect through drift: restart the
+(`"worktree"`/`"same-dir"`), `capacity`, `permission_mode`,
+`create_session_in_dir` (default `true`; `false` passes
+`--no-create-session-in-dir` so no session is pre-created in the repo
+root) — with per-repo overrides in `[repos."<path>"]` tables (any
+`[claude]` key except `bin`, plus `post_pull`). Changing them takes effect through drift: restart the
 daemon and each affected supervisor converges once its sessions are quiet.
 
 Environment variables override everything, mainly for tests:

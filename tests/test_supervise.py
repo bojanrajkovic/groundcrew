@@ -16,6 +16,7 @@ RC_ARGV = (
     "32",
     "--permission-mode",
     "bypassPermissions",
+    "--create-session-in-dir",
 )
 
 
@@ -30,7 +31,9 @@ def test_rc_args_emits_defaults_explicitly() -> None:
 
 
 def test_rc_args_reflects_settings() -> None:
-    settings = RepoSettings(spawn="same-dir", capacity=4, permission_mode="plan")
+    settings = RepoSettings(
+        spawn="same-dir", capacity=4, permission_mode="plan", create_session_in_dir=False
+    )
 
     args = rc_args(settings)
 
@@ -42,6 +45,7 @@ def test_rc_args_reflects_settings() -> None:
         "4",
         "--permission-mode",
         "plan",
+        "--no-create-session-in-dir",
     )
 
 
