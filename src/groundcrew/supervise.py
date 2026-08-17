@@ -37,6 +37,7 @@ from groundcrew.config import (
     BACKOFF_SECONDS,
     CRASH_LIMIT,
     CRASH_WINDOW_SECONDS,
+    LOG_MAX_BYTES,
     PULL_FAILURES_BEFORE_ALERT,
     TERMINATE_TIMEOUT,
     RepoSettings,
@@ -122,8 +123,30 @@ def readable_log(text: str) -> Iterator[str]:
         yield line
 
 
+def previous_log(path: Path) -> Path:
+    return path.with_name(path.name + ".1")  # the mangled name carries dots of its own
+
+
+def rotate_log(repo: Path, limit: int = LOG_MAX_BYTES) -> None:
+    """Retire an oversized log to `.1`, discarding whatever was there before.
+
+    Spawn is the only safe moment: the previous child is dead and the next has
+    not opened the file yet. Renaming it out from under a live supervisor would
+    leave that process writing to an unlinked inode, and the log every later
+    reader opens would sit empty while the fleet ran on.
+
+    ponytail: enforced per spawn, so a supervisor that never restarts keeps
+    growing. Nightly `claude update` restarts the fleet on version drift, which
+    makes that rare; move the check into the poll loop if a repo outlives it.
+    """
+    path = log_path(repo)
+    if path.exists() and path.stat().st_size > limit:
+        path.replace(previous_log(path))
+
+
 def spawn(repo: Path, version: str | None, settings: RepoSettings, binary: Path) -> Supervisor:
     args = rc_args(settings)
+    rotate_log(repo)
     # Append: a respawn must not erase the previous run's output — that is
     # exactly the crash evidence a crash-loop alert sends you to read.
     with log_path(repo).open("ab") as log:

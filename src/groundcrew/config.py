@@ -33,6 +33,9 @@ POST_PULL_TIMEOUT = 600
 UPDATE_TIMEOUT = 600
 TERMINATE_TIMEOUT = 60
 NOTIFY_TIMEOUT = 30
+# Supervisor logs are mostly repainted frames, so this holds far more history
+# than its size suggests once `groundcrew logs` has collapsed the duplicates.
+LOG_MAX_BYTES = 2 * 1024 * 1024
 
 EX_CONFIG = 78  # sysexits.h; the systemd unit declares it restart-preventing
 
