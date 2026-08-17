@@ -113,3 +113,35 @@ def test_diverged_default_branch_is_not_a_failure(tmp_path: Path) -> None:
 
     assert outcome.kind is gitops.PullKind.DIVERGED
     assert "\n" not in outcome.detail  # summarized to one line for the status table
+
+
+def test_remove_worktree_deletes_worktree_and_branch(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path / "repo")
+    wt_path = repo / ".claude" / "worktrees" / "bridge-cse_gone"
+    git(repo, "worktree", "add", "-q", "-b", "worktree-bridge-cse_gone", str(wt_path))
+    (wt_path / "scratch.txt").write_text("in-flight\n")
+    git(wt_path, "add", ".")
+    git(wt_path, "commit", "-qm", "wip")
+    (wt_path / "dirty.txt").write_text("dirty\n")
+    git(wt_path, "add", "dirty.txt")
+    [wt] = gitops.spawned_worktrees(repo)
+
+    assert "dirty.txt" in gitops.worktree_dirty_listing(wt)
+    assert "wip" in gitops.worktree_unmerged_listing(repo, wt)
+
+    # dirty files and unmerged commits must not block a deliberate removal
+    assert gitops.remove_worktree(repo, wt) is None
+    assert not wt_path.exists()
+    assert gitops.spawned_worktrees(repo) == []
+    assert git(repo, "branch", "--list", "worktree-bridge-cse_gone").stdout.strip() == ""
+
+
+def test_remove_worktree_reports_failure(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path / "repo")
+    ghost = gitops.WorktreeInfo(
+        path=repo / "nope", branch=None, dirty_files=0, unmerged_commits=0, age_days=0.0
+    )
+
+    error = gitops.remove_worktree(repo, ghost)
+
+    assert error is not None

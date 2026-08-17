@@ -153,6 +153,33 @@ class WorktreeInfo:
     age_days: float
 
 
+def worktree_dirty_listing(wt: WorktreeInfo) -> str:
+    """`git status --short` for the worktree, for display before deletion."""
+    return run_git(wt.path, "status", "--short").stdout.rstrip()
+
+
+def worktree_unmerged_listing(repo: Path, wt: WorktreeInfo) -> str:
+    """One line per commit that deleting the worktree's branch would orphan."""
+    if not wt.branch:
+        return ""
+    return run_git(repo, "log", "--oneline", f"HEAD..{wt.branch}").stdout.rstrip()
+
+
+def remove_worktree(repo: Path, wt: WorktreeInfo) -> str | None:
+    """Force-remove a spawned worktree and delete its branch.
+
+    Returns an error summary, or None on success. Branch deletion failure is
+    deliberately non-fatal: the worktree is already gone, and an orphaned
+    branch shows up in `git branch` rather than silently costing disk.
+    """
+    removed = run_git(repo, "worktree", "remove", "--force", str(wt.path))
+    if removed.returncode != 0:
+        return summarize(removed.stderr) or "worktree remove failed"
+    if wt.branch:
+        run_git(repo, "branch", "-D", wt.branch)
+    return None
+
+
 def spawned_worktrees(repo: Path) -> list[WorktreeInfo]:
     """Worktrees remote-control created under <repo>/.claude/worktrees/."""
     base = repo / ".claude" / "worktrees"

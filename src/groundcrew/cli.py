@@ -150,11 +150,9 @@ def cmd_clean(raw: str) -> int:
         state = ", ".join(parts) or "clean"
         print(f"\n{wt.path.name} — branch {wt.branch}, {state}, {wt.age_days:.0f}d old")
         if wt.dirty_files:
-            diff = gitops.run_git(wt.path, "status", "--short")
-            print(diff.stdout.rstrip())
-        if wt.unmerged_commits and wt.branch:
-            commits = gitops.run_git(repo, "log", "--oneline", f"HEAD..{wt.branch}")
-            print(commits.stdout.rstrip())
+            print(gitops.worktree_dirty_listing(wt))
+        if wt.unmerged_commits:
+            print(gitops.worktree_unmerged_listing(repo, wt))
         prompt = (
             f"DELETE this worktree, its branch, and the {wt.unmerged_commits} commit(s) "
             "shown above (unrecoverable outside the reflog)? [y/N] "
@@ -165,13 +163,8 @@ def cmd_clean(raw: str) -> int:
         if answer != "y":
             print("kept")
             continue
-        removed = gitops.run_git(repo, "worktree", "remove", "--force", str(wt.path))
-        if removed.returncode != 0:
-            print(f"failed: {removed.stderr.strip()}")
-            continue
-        if wt.branch:
-            gitops.run_git(repo, "branch", "-D", wt.branch)
-        print("deleted")
+        error = gitops.remove_worktree(repo, wt)
+        print(f"failed: {error}" if error else "deleted")
     return 0
 
 
