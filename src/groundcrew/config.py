@@ -61,6 +61,7 @@ class RepoSettings(BaseModel):
     spawn: Annotated[Spawn, BeforeValidator(_reject_session_spawn)] = "worktree"
     capacity: int = 32
     permission_mode: PermissionMode = "bypassPermissions"
+    create_session_in_dir: bool = True
     post_pull: tuple[str, ...] = ()
 
 
@@ -100,6 +101,7 @@ class _ClaudeTable(BaseModel):
     spawn: Annotated[Spawn, BeforeValidator(_reject_session_spawn)] | None = None
     capacity: int | None = None
     permission_mode: PermissionMode | None = None
+    create_session_in_dir: bool | None = None
     bin: str | None = None
 
 
@@ -126,6 +128,7 @@ class _RepoOverride(BaseModel):
     spawn: Annotated[Spawn, BeforeValidator(_reject_session_spawn)] | None = None
     capacity: int | None = None
     permission_mode: PermissionMode | None = None
+    create_session_in_dir: bool | None = None
     post_pull: list[str] | None = None
 
 
@@ -159,6 +162,7 @@ def _format_loc(loc: tuple[str | int, ...]) -> str:
 
 
 _TYPE_PHRASES = {
+    "bool_type": "must be a boolean",
     "int_type": "must be an integer",
     "int_parsing": "must be an integer",
     "string_type": "must be a string",
@@ -225,6 +229,7 @@ def load() -> Config:
             "spawn": file.claude.spawn,
             "capacity": file.claude.capacity,
             "permission_mode": file.claude.permission_mode,
+            "create_session_in_dir": file.claude.create_session_in_dir,
             "post_pull": _command(file.hooks.post_pull),
         }.items()
         if v is not None
@@ -239,6 +244,7 @@ def load() -> Config:
                 "spawn": table.spawn,
                 "capacity": table.capacity,
                 "permission_mode": table.permission_mode,
+                "create_session_in_dir": table.create_session_in_dir,
                 "post_pull": _command(table.post_pull),
             }.items()
             if v is not None

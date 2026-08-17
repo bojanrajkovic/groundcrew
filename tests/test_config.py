@@ -30,6 +30,7 @@ def test_full_file_parses_and_materializes_overrides(sandbox: Path) -> None:
         spawn = "same-dir"
         capacity = 8
         permission_mode = "acceptEdits"
+        create_session_in_dir = false
 
         [notify]
         command = ["my-notifier", "--flag"]
@@ -58,6 +59,7 @@ def test_full_file_parses_and_materializes_overrides(sandbox: Path) -> None:
     assert cfg.nightly_hour == 2
     assert cfg.defaults.spawn == "same-dir"
     assert cfg.defaults.capacity == 8
+    assert cfg.defaults.create_session_in_dir is False
     assert cfg.defaults.post_pull == ("mise", "install")
     # the override is a complete RepoSettings: unset keys inherit the defaults
     override = cfg.for_repo(Path("/somewhere/cautious"))
@@ -65,6 +67,7 @@ def test_full_file_parses_and_materializes_overrides(sandbox: Path) -> None:
     assert override.post_pull == ()
     assert override.spawn == "same-dir"
     assert override.capacity == 8
+    assert override.create_session_in_dir is False
     # unknown repos get the defaults object itself
     assert cfg.for_repo(Path("/somewhere/else")) is cfg.defaults
 
@@ -157,6 +160,13 @@ def test_wrong_type_rejected(sandbox: Path) -> None:
     write_config(sandbox, '[claude]\ncapacity = "many"\n')
 
     with pytest.raises(config.ConfigError, match=r"\[claude\].capacity"):
+        config.load()
+
+
+def test_create_session_in_dir_must_be_boolean(sandbox: Path) -> None:
+    write_config(sandbox, '[claude]\ncreate_session_in_dir = "no"\n')
+
+    with pytest.raises(config.ConfigError, match="must be a boolean"):
         config.load()
 
 
