@@ -66,11 +66,18 @@ an alert, and so does a stop that goes ahead with live sessions.
 
 remote-control engines do not populate the session `status` field, so busy/idle
 is inferred from transcript modification time. A session waiting on a
-background task writes nothing to its transcript, so it reads as idle for as
-long as the wait runs.
+background task writes nothing to its transcript, so silence alone does not
+distinguish a build that has been running for an hour from a finished turn.
 
-The transcript still records the wait: a task announced as `background (ID: x)`
-with no later `<task-notification>` naming `x` had not finished.
+The transcript still records the wait. A backgrounded run is announced as
+`background (ID: x)` and reported finished by a `<task-notification>` naming
+the same `x`, so an id with no matching notification is a task still running.
+A session holding one is never quiet, however long its transcript has been
+silent.
+
+That covers backgrounded runs, which is where long waits collect. A tool
+running in the foreground past the quiet window is still indistinguishable from
+an idle session.
 
 ## Reattach flags
 

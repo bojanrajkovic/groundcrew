@@ -99,10 +99,10 @@ CLI's platform-specific `procStart` value.
 - Worktree sessions spawn from the repo's current HEAD, not the default
   branch — keep repos parked on their default branch; `status` warns when one
   isn't.
-- A session silently running a tool for longer than the quiet window can be
-  mistaken for idle and restarted, losing that turn's remaining work. Background
-  tasks are the common case — they write nothing to the transcript while they
-  wait. Dirty files survive; the session itself may not.
+- A session running a *foreground* tool for longer than the quiet window can
+  still be mistaken for idle and restarted, losing that turn's remaining work.
+  Backgrounded runs are covered: an unfinished task id in the transcript keeps
+  the session busy. Dirty files survive either way; the session itself may not.
 - `create_session_in_dir = false` costs version convergence: drift restarts
   wait for the repo's sessions to end, because without an in-dir session a
   restart would lose them. `status` reports the deferral.

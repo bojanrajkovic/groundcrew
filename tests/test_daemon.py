@@ -207,6 +207,45 @@ def test_converge_restarts_a_real_drifted_supervisor(sandbox: Path) -> None:
     assert handle.poll() is not None  # the real process is gone
 
 
+def test_converge_spares_a_supervisor_whose_session_waits_on_a_background_task(
+    sandbox: Path,
+) -> None:
+    """Silence satisfies the quiet window; the task it started has still not ended."""
+    write_config(sandbox, "[timing]\nquiet_seconds = 0\n")  # quiet is satisfied
+    fake_claude = script(sandbox / "fake-claude", "exec sleep 30")
+    repo = sandbox / "projects" / "repo"
+    repo.mkdir()
+    daemon = Daemon(config.load())  # create_session_in_dir on: only quiet is in play
+    sr = daemon.repo(repo)
+    sr.supervisor = supervise.spawn(repo, "0.9.0", RepoSettings(), binary=fake_claude)
+    handle = sr.supervisor.handle
+    assert handle is not None
+    daemon.binary_version = "1.0.0"  # version drift
+
+    transcripts = config.claude_home() / "projects" / "-repo"
+    transcripts.mkdir(parents=True)
+    transcript = transcripts / "sess-waiting.jsonl"
+    transcript.write_text('{"content": "Command running in background (ID: bwait1)."}\n')
+
+    engine = subprocess.Popen(["sleep", "30"])
+    try:
+        write_session(
+            engine.pid,
+            "sess-waiting",
+            str(repo / "wt"),
+            int(time.time() * 1000),
+            entrypoint="sdk-cli",
+        )
+        daemon.converge(repo, sr, sessions=[])
+    finally:
+        engine.kill()
+        engine.wait()
+
+    assert daemon.fleet[repo].supervisor is not None
+    assert handle.poll() is None  # the wait was not mistaken for an idle session
+    handle.terminate()
+
+
 def test_converge_spares_a_drifted_supervisor_that_would_lose_its_sessions(
     sandbox: Path,
 ) -> None:
