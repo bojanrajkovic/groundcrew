@@ -6,30 +6,10 @@ import subprocess
 import time
 from pathlib import Path
 
+from conftest import write_session
+
 from groundcrew import claude_state
 from groundcrew.config import claude_home, claude_json_path
-
-
-def write_session(
-    pid: int,
-    session_id: str,
-    cwd: str,
-    started_at_ms: int,
-    *,
-    entrypoint: str | None = None,
-) -> None:
-    sessions = claude_home() / "sessions"
-    sessions.mkdir(parents=True, exist_ok=True)
-    data: dict[str, object] = {
-        "pid": pid,
-        "sessionId": session_id,
-        "cwd": cwd,
-        "startedAt": started_at_ms,
-        "version": "2.1.233",
-    }
-    if entrypoint is not None:
-        data["entrypoint"] = entrypoint
-    (sessions / f"{pid}.json").write_text(json.dumps(data))
 
 
 def test_seed_trust_preserves_other_content(sandbox: Path) -> None:
@@ -115,6 +95,56 @@ def test_quiet_detection_uses_transcript_mtime(sandbox: Path) -> None:
     assert claude_state.all_quiet([session], quiet_seconds=900, now=now)
 
     assert claude_state.all_quiet([], quiet_seconds=900, now=now)  # no sessions = quiet
+
+
+# A background task produces no transcript writes while it runs, so mtime alone
+# reads the session as idle. The task ids in the transcript say otherwise.
+
+LAUNCH = '{{"content": "Command running in background (ID: {tid}). Output is..."}}'
+FINISH = '{{"content": "<task-notification>\\n<task-id>{tid}</task-id>\\n<status>completed"}}'
+
+
+def transcript_for(session_id: str, *lines: str) -> Path:
+    transcripts = claude_home() / "projects" / "-repo"
+    transcripts.mkdir(parents=True, exist_ok=True)
+    path = transcripts / f"{session_id}.jsonl"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_a_session_waiting_on_a_background_task_is_never_quiet(sandbox: Path) -> None:
+    path = transcript_for("sess-bg", LAUNCH.format(tid="b64gw58x8"))
+    session = claude_state.SessionInfo(1, "sess-bg", Path("/repo"), started_at=0, version=None)
+    now = time.time()
+    os.utime(path, (now - 10_000, now - 10_000))  # silent for hours
+
+    assert claude_state.pending_tasks(session) == {"b64gw58x8"}
+    assert not claude_state.all_quiet([session], quiet_seconds=900, now=now)
+
+
+def test_the_task_notification_releases_the_session(sandbox: Path) -> None:
+    path = transcript_for("sess-bg", LAUNCH.format(tid="b64gw58x8"), FINISH.format(tid="b64gw58x8"))
+    session = claude_state.SessionInfo(1, "sess-bg", Path("/repo"), started_at=0, version=None)
+    now = time.time()
+    os.utime(path, (now - 10_000, now - 10_000))
+
+    assert claude_state.pending_tasks(session) == set()
+    assert claude_state.all_quiet([session], quiet_seconds=900, now=now)
+
+
+def test_only_the_unfinished_task_holds_the_session(sandbox: Path) -> None:
+    path = transcript_for(
+        "sess-bg",
+        LAUNCH.format(tid="done1"),
+        FINISH.format(tid="done1"),
+        LAUNCH.format(tid="still2"),
+    )
+    session = claude_state.SessionInfo(1, "sess-bg", Path("/repo"), started_at=0, version=None)
+    now = time.time()
+    os.utime(path, (now - 10_000, now - 10_000))
+
+    assert claude_state.pending_tasks(session) == {"still2"}
+    assert not claude_state.all_quiet([session], quiet_seconds=900, now=now)
 
 
 def test_repo_quiet_composes_fresh_session_state(sandbox: Path) -> None:

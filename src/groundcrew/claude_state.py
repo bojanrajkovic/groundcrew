@@ -12,7 +12,8 @@ Facts this module leans on (verified against Claude Code 2.1.x):
   records `procStart`, but its format is the CLI's platform-specific implementation
   detail — Linux jiffies today — so groundcrew never reads it.)
 - The engines' `status` field is not populated for remote-control sessions, so
-  busy/idle is inferred from transcript mtime (quiet-for-N-minutes heuristic).
+  busy/idle is inferred from transcript mtime (quiet-for-N-minutes heuristic),
+  corrected by the transcript's own record of unfinished background tasks.
 - Transcripts live at `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`; we find
   them by globbing for the sessionId rather than re-implementing path encoding.
 """
@@ -30,6 +31,12 @@ import psutil
 from groundcrew.config import atomic_write, claude_home, claude_json_path
 
 _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
+
+# A backgrounded tool run is announced with its task id and later reported
+# finished under the same id. Both markers are literal in the JSONL, so the
+# transcript is matched as text rather than parsed.
+_TASK_LAUNCHED = re.compile(r"background \(ID: ([A-Za-z0-9]+)\)")
+_TASK_FINISHED = re.compile(r"<task-id>([A-Za-z0-9]+)</task-id>")
 
 
 def trusted_paths() -> set[str]:
@@ -171,8 +178,39 @@ def last_activity(session: SessionInfo) -> float:
     return newest
 
 
+def pending_tasks(session: SessionInfo) -> set[str]:
+    """Task ids this session backgrounded and has not been told finished.
+
+    Scanning the whole transcript is affordable because callers only reach here
+    once mtime already says the session looks idle, which is hourly at most.
+    """
+    launched: set[str] = set()
+    finished: set[str] = set()
+    for transcript in claude_home().glob(f"projects/*/{session.session_id}.jsonl"):
+        try:
+            text = transcript.read_text(errors="replace")
+        except OSError:
+            continue
+        launched.update(_TASK_LAUNCHED.findall(text))
+        finished.update(_TASK_FINISHED.findall(text))
+    return launched - finished
+
+
+def session_quiet(session: SessionInfo, quiet_seconds: float, now: float) -> bool:
+    """Is this session idle, rather than merely silent?
+
+    Transcript mtime answers "silent". It cannot answer "idle": an engine
+    waiting on a backgrounded tool run writes nothing for as long as the wait
+    lasts, so a build or a CI watch reads exactly like a finished turn. An
+    unfinished task id is the standing evidence that the wait is still on.
+    """
+    if now - last_activity(session) < quiet_seconds:
+        return False
+    return not pending_tasks(session)
+
+
 def all_quiet(sessions: list[SessionInfo], quiet_seconds: float, now: float) -> bool:
-    return all(now - last_activity(s) >= quiet_seconds for s in sessions)
+    return all(session_quiet(s, quiet_seconds, now) for s in sessions)
 
 
 def repo_sessions(repo: Path) -> list[SessionInfo]:

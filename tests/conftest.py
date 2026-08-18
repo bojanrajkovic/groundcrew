@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
+
+from groundcrew.config import claude_home
 
 
 @pytest.fixture
@@ -61,3 +64,26 @@ def write_config(sandbox: Path, body: str) -> None:
     cfg_dir = sandbox / "config"
     cfg_dir.mkdir(exist_ok=True)
     (cfg_dir / "config.toml").write_text(body)
+
+
+def write_session(
+    pid: int,
+    session_id: str,
+    cwd: str,
+    started_at_ms: int,
+    *,
+    entrypoint: str | None = None,
+) -> None:
+    """Write the metadata file a running engine leaves in ~/.claude/sessions."""
+    sessions = claude_home() / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    data: dict[str, object] = {
+        "pid": pid,
+        "sessionId": session_id,
+        "cwd": cwd,
+        "startedAt": started_at_ms,
+        "version": "2.1.233",
+    }
+    if entrypoint is not None:
+        data["entrypoint"] = entrypoint
+    (sessions / f"{pid}.json").write_text(json.dumps(data))

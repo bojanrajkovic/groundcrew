@@ -16,18 +16,22 @@ Each supervisor connects its repo to a cloud environment; sessions requested
 from claude.ai run as engine child processes, each in an isolated git worktree
 under `<repo>/.claude/worktrees/`.
 
-## Why restarts are safe
+## What a restart costs
 
 Session identity lives server-side. Restarting a supervisor in the same
-directory reconnects the same cloud environment and the same sessions; worktree
-sessions re-materialize lazily on next use. The CLI garbage-collects *clean*
-worktrees on shutdown but preserves *dirty* ones (and their branches), so
-uncommitted in-flight work survives any restart. All of this was verified
-empirically against Claude Code 2.1.x before groundcrew was built.
+directory reconnects the same cloud environment **only while
+`create_session_in_dir` is on**, because the replacement reconnects through
+that in-dir session. Without one, every restart registers a new environment and
+abandons the previous one's sessions, leaving their worktrees on disk with
+nothing that owns them. The CLI garbage-collects *clean* worktrees on shutdown
+but preserves *dirty* ones (and their branches), so uncommitted in-flight work
+is orphaned rather than destroyed.
 
-Because remote-control engines never populate the session `status` field,
-busy/idle is inferred: a repo is restartable once every one of its sessions has
-had no transcript writes for the quiet window (15 minutes by default).
+A drift restart therefore passes two gates: every session transcript-quiet for
+the quiet window (15 minutes by default, since remote-control engines never
+populate the session `status` field), and an environment that survives — there
+is an in-dir session, or no sessions at all. See
+[restart-safety.md](restart-safety.md).
 
 ## Inside the daemon
 
@@ -47,8 +51,8 @@ tested against real substrate (git repos, processes, scripts).
 
 | Cadence (defaults; tick and nightly hour are config) | Work |
 |---|---|
-| 30 s | Reconcile: spawn missing supervisors, respawn dead ones (crash-loop breaker: 3 deaths in 10 min → 30 min backoff + a notification), retire unregistered repos when quiet |
-| hourly | Per repo: freshness pull → the post-pull hook when the default branch moved in-tree → drift restart when all sessions are quiet |
+| 30 s | Reconcile: spawn missing supervisors, respawn dead ones (crash-loop breaker: 3 deaths in 10 min → 30 min backoff + a notification), retire unregistered repos once stopping them is safe |
+| hourly | Per repo: freshness pull → the post-pull hook when the default branch moved in-tree → drift restart once stopping is safe |
 | nightly 04:00 | `claude update` as a backstop for the native auto-updater |
 
 Spawns are rate-limited to a few per reconcile pass: registering many
@@ -69,9 +73,10 @@ daemon restart is free (children survive and are re-adopted, hand-started
 supervisors included, whatever their spawn mode) and adopted supervisors with
 stale arguments converge as args-drift.
 
-Repos configured with `spawn = "same-dir"` run every session in the repo
-root, so freshness pulls are skipped whenever such a repo has any live
-session — quiet is not enough when the working tree is shared.
+A freshness pull rewrites the main checkout, so it is skipped whenever a live
+session is working *in* that checkout — every session under `spawn =
+"same-dir"`, and the in-dir session under `spawn = "worktree"`. The session's
+own cwd decides it; no launch setting is re-derived.
 
 Pull policy: on the default branch and clean → `git pull --ff-only`; parked on
 another branch → `git fetch origin <default>:<default>` (updates the ref,
@@ -94,8 +99,10 @@ CLI's platform-specific `procStart` value.
 - Worktree sessions spawn from the repo's current HEAD, not the default
   branch — keep repos parked on their default branch; `status` warns when one
   isn't.
-- A session silently running a tool for longer than the quiet window can be mistaken for idle and
-  restarted; the conversation resumes and dirty files survive, but that turn's
-  remaining work is lost.
-- Resume after SIGKILL is untested; groundcrew always tries SIGTERM first and
-  escalates only after 60 s.
+- A session running a *foreground* tool for longer than the quiet window can
+  still be mistaken for idle and restarted, losing that turn's remaining work.
+  Backgrounded runs are covered: an unfinished task id in the transcript keeps
+  the session busy. Dirty files survive either way; the session itself may not.
+- `create_session_in_dir = false` costs version convergence: drift restarts
+  wait for the repo's sessions to end, because without an in-dir session a
+  restart would lose them. `status` reports the deferral.

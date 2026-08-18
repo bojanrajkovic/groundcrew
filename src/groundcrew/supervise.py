@@ -10,9 +10,12 @@ Each managed repo gets one `claude remote-control` process launched with that
 repo's effective settings. Children are spawned with start_new_session=True so
 they survive a daemon restart (systemd KillMode=process); on startup the
 daemon re-adopts them by scanning the process table (psutil) for matching
-cmdline + cwd. Restarting a supervisor is safe by construction: the CLI
-reconnects the same cloud environment and sessions, and preserves dirty
-worktrees.
+cmdline + cwd.
+
+Restarting a supervisor always preserves dirty worktrees. It keeps the cloud
+environment only when the repo runs with `create_session_in_dir` on, because a
+replacement supervisor reconnects through that in-dir session. Without one, the
+sessions of the outgoing environment are lost. See docs/restart-safety.md.
 """
 
 from __future__ import annotations
@@ -39,11 +42,16 @@ from groundcrew.config import (
     CRASH_WINDOW_SECONDS,
     LOG_MAX_BYTES,
     PULL_FAILURES_BEFORE_ALERT,
+    STOP_DEFER_ALERT_SECONDS,
     TERMINATE_TIMEOUT,
     RepoSettings,
     state_dir,
 )
 from groundcrew.gitops import PullKind, PullOutcome
+
+# Suppresses the in-dir session, which is what a replacement supervisor
+# reconnects to the previous environment through. See docs/restart-safety.md.
+NO_IN_DIR_SESSION = "--no-create-session-in-dir"
 
 
 def rc_args(settings: RepoSettings) -> tuple[str, ...]:
@@ -61,9 +69,7 @@ def rc_args(settings: RepoSettings) -> tuple[str, ...]:
         str(settings.capacity),
         "--permission-mode",
         settings.permission_mode,
-        "--create-session-in-dir"
-        if settings.create_session_in_dir
-        else "--no-create-session-in-dir",
+        "--create-session-in-dir" if settings.create_session_in_dir else NO_IN_DIR_SESSION,
     )
 
 
@@ -359,11 +365,13 @@ class RunHook:
 @dataclass(frozen=True)
 class Restart:
     reason: str
+    alert: Alert | None = None
 
 
 @dataclass(frozen=True)
 class Defer:
     reason: str
+    alert: Alert | None = None
 
 
 @dataclass
@@ -383,7 +391,19 @@ class SupervisedRepo:
     last_pull_at: float = 0.0
     last_pull_kind: str = ""
     last_pull_detail: str = ""
+    stop_deferred_since: float = 0.0
+    stop_alerted: bool = False
     warnings: dict[WarningKind, str] = field(default_factory=dict)
+
+    def strands_sessions(self, sessions: int) -> bool:
+        """Would stopping this supervisor lose sessions rather than interrupt them?
+
+        Read from the running process, not from `settings`: changing the config
+        does not add an in-dir session to a supervisor already running without
+        one. See docs/restart-safety.md.
+        """
+        sup = self.supervisor
+        return bool(sessions) and sup is not None and NO_IN_DIR_SESSION in sup.launched_args
 
     # -- supervision ------------------------------------------------------
 
@@ -414,17 +434,33 @@ class SupervisedRepo:
             return Plan.WAIT
         return Plan.SPAWN
 
-    def plan_retirement(self, *, alive: bool, quiet: bool) -> Retire:
+    def plan_retirement(
+        self, *, alive: bool, quiet: bool, sessions: int, now: float
+    ) -> Retire | Alert:
+        """Retiring stops a supervisor, so it uses the same two gates as drift."""
         if self.supervisor is None:
             return Retire.WAIT
         if not alive:
+            self.stop_deferred_since = 0.0
+            self.stop_alerted = False
             return Retire.FORGET
-        return Retire.TERMINATE if quiet else Retire.WAIT
+        if not quiet or self.strands_sessions(sessions):
+            stuck = self._stuck_alert(now, "retirement", f"{sessions} live session(s)")
+            return stuck if stuck is not None else Retire.WAIT
+        self.stop_deferred_since = 0.0
+        self.stop_alerted = False
+        return Retire.TERMINATE
 
     # -- freshness --------------------------------------------------------
 
-    def plan_freshness(self, session_count: int) -> Fresh:
-        """May the shell pull? same-dir sessions share the working tree."""
+    def plan_freshness(self, root_sessions: int) -> Fresh:
+        """May the shell pull? A pull rewrites the main checkout.
+
+        What blocks it is a session working in that checkout. `spawn` only
+        approximates that: same-dir puts every session there, and worktree mode
+        still leaves the in-dir session there. The shell counts sessions whose
+        cwd is the repo root, so no launch setting is re-derived here.
+        """
         for kind in (
             WarningKind.PARKED,
             WarningKind.DIRTY,
@@ -434,9 +470,9 @@ class SupervisedRepo:
             WarningKind.DEFERRED,
         ):
             self.warnings.pop(kind, None)
-        if self.settings.spawn == "same-dir" and session_count > 0:
+        if root_sessions:
             self.warnings[WarningKind.DEFERRED] = (
-                f"deferred: pull skipped, {session_count} live session(s) share the working tree"
+                f"deferred: pull skipped, {root_sessions} live session(s) share the working tree"
             )
             return Fresh.SKIP
         return Fresh.PULL
@@ -482,12 +518,23 @@ class SupervisedRepo:
     # -- drift ------------------------------------------------------------
 
     def plan_drift(
-        self, binary_version: str | None, probed_version: str | None, *, quiet: bool
+        self,
+        binary_version: str | None,
+        probed_version: str | None,
+        *,
+        quiet: bool,
+        sessions: int,
+        now: float,
     ) -> Restart | Defer | None:
         """Does the supervisor match the desired (version, args) pair? None = converged.
 
         probed_version fills a hole adoption leaves open (adoptees carry no
         launched_version); the shell observes it, the owner records it here.
+
+        Two conditions gate the restart. `quiet` asks whether a session is
+        mid-turn; losing that costs the turn. `sessions` asks whether any would
+        be lost outright, which happens whenever the supervisor runs without an
+        in-dir session, however idle they look. See docs/restart-safety.md.
         """
         self.warnings.pop(WarningKind.DRIFT, None)
         sup = self.supervisor
@@ -501,14 +548,49 @@ class SupervisedRepo:
         if sup.launched_args != rc_args(self.settings):
             reasons.append("args")
         if not reasons:
+            self.stop_deferred_since = 0.0
+            self.stop_alerted = False
             return None
         reason = " + ".join(reasons)
+        if self.strands_sessions(sessions):
+            self.warnings[WarningKind.DRIFT] = (
+                f"drift ({reason}): restart deferred, would lose {sessions} session(s) "
+                "— no in-dir session to reconnect through"
+            )
+            stuck = self._stuck_alert(now, "drift restart", f"{sessions} session(s) blocking")
+            return Defer(reason, stuck)
         if not quiet:
             self.warnings[WarningKind.DRIFT] = (
                 f"drift ({reason}): restart deferred, session(s) active"
             )
-            return Defer(reason)
-        return Restart(reason)
+            stuck = self._stuck_alert(now, "drift restart", "session(s) busy")
+            return Defer(reason, stuck)
+        self.stop_deferred_since = 0.0
+        self.stop_alerted = False
+        # The environment survives, but each session still loses the turn it was
+        # in, and a session waiting on a background task reads as quiet while it
+        # waits.
+        interrupted = (
+            Alert(
+                "groundcrew: sessions interrupted",
+                f"{self.path.name}: restarting for {reason}; {sessions} session(s) interrupted",
+            )
+            if sessions
+            else None
+        )
+        return Restart(reason, interrupted)
+
+    def _stuck_alert(self, now: float, what: str, detail: str) -> Alert | None:
+        """The alert for a stop deferred past the threshold, once per deferral."""
+        if not self.stop_deferred_since:
+            self.stop_deferred_since = now
+        if self.stop_alerted or now - self.stop_deferred_since < STOP_DEFER_ALERT_SECONDS:
+            return None
+        self.stop_alerted = True
+        return Alert(
+            f"groundcrew: {what} stuck",
+            f"{self.path.name}: {what} deferred over 24h — {detail}",
+        )
 
     # -- snapshot ---------------------------------------------------------
 

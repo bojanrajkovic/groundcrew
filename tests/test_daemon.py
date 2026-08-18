@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
 import pytest
-from conftest import add_origin_commit, clone, make_repo, script, write_config
+from conftest import (
+    add_origin_commit,
+    clone,
+    git,
+    make_repo,
+    script,
+    write_config,
+    write_session,
+)
 
 from groundcrew import claude_state, cli, config, supervise
 from groundcrew.config import RepoSettings
@@ -78,6 +87,35 @@ def test_freshen_runs_hook_in_repo_after_branch_move(sandbox: Path) -> None:
     daemon.freshen(repo, daemon.repo(repo), time.time())
 
     assert marker.read_text().strip() == str(repo)
+
+
+def test_freshen_skips_the_pull_while_a_session_sits_in_the_main_checkout(
+    sandbox: Path,
+) -> None:
+    """A worktree repo still has an in-dir session, and a pull would move it."""
+    root = sandbox / "projects"
+    origin = make_repo(root / "origin")
+    repo = clone(origin, root / "repo")
+    add_origin_commit(origin)
+    before = git(repo, "rev-parse", "HEAD").stdout.strip()
+    daemon = Daemon(config.load())  # spawn defaults to worktree
+
+    engine = subprocess.Popen(["sleep", "30"])
+    try:
+        write_session(
+            engine.pid,
+            "sess-indir",
+            str(repo),
+            int(time.time() * 1000),
+            entrypoint="sdk-cli",
+        )
+        daemon.freshen(repo, daemon.repo(repo), time.time())
+    finally:
+        engine.kill()
+        engine.wait()
+
+    assert git(repo, "rev-parse", "HEAD").stdout.strip() == before
+    assert WarningKind.DEFERRED in daemon.repo(repo).warnings
 
 
 def test_freshen_hook_failure_reaches_the_real_notifier(sandbox: Path) -> None:
@@ -167,6 +205,78 @@ def test_converge_restarts_a_real_drifted_supervisor(sandbox: Path) -> None:
     # consider the assertion statically false
     assert daemon.fleet[repo].supervisor is None
     assert handle.poll() is not None  # the real process is gone
+
+
+def test_converge_spares_a_supervisor_whose_session_waits_on_a_background_task(
+    sandbox: Path,
+) -> None:
+    """Silence satisfies the quiet window; the task it started has still not ended."""
+    write_config(sandbox, "[timing]\nquiet_seconds = 0\n")  # quiet is satisfied
+    fake_claude = script(sandbox / "fake-claude", "exec sleep 30")
+    repo = sandbox / "projects" / "repo"
+    repo.mkdir()
+    daemon = Daemon(config.load())  # create_session_in_dir on: only quiet is in play
+    sr = daemon.repo(repo)
+    sr.supervisor = supervise.spawn(repo, "0.9.0", RepoSettings(), binary=fake_claude)
+    handle = sr.supervisor.handle
+    assert handle is not None
+    daemon.binary_version = "1.0.0"  # version drift
+
+    transcripts = config.claude_home() / "projects" / "-repo"
+    transcripts.mkdir(parents=True)
+    transcript = transcripts / "sess-waiting.jsonl"
+    transcript.write_text('{"content": "Command running in background (ID: bwait1)."}\n')
+
+    engine = subprocess.Popen(["sleep", "30"])
+    try:
+        write_session(
+            engine.pid,
+            "sess-waiting",
+            str(repo / "wt"),
+            int(time.time() * 1000),
+            entrypoint="sdk-cli",
+        )
+        daemon.converge(repo, sr, sessions=[])
+    finally:
+        engine.kill()
+        engine.wait()
+
+    assert daemon.fleet[repo].supervisor is not None
+    assert handle.poll() is None  # the wait was not mistaken for an idle session
+    handle.terminate()
+
+
+def test_converge_spares_a_drifted_supervisor_that_would_lose_its_sessions(
+    sandbox: Path,
+) -> None:
+    """Without an in-dir session, a quiet session dies with the environment."""
+    write_config(sandbox, "[timing]\nquiet_seconds = 0\n")  # quiet is satisfied
+    fake_claude = script(sandbox / "fake-claude", "exec sleep 30")
+    repo = sandbox / "projects" / "repo"
+    repo.mkdir()
+    settings = RepoSettings(create_session_in_dir=False)
+    daemon = Daemon(config.load())
+    sr = daemon.repo(repo)
+    sr.settings = settings
+    sr.supervisor = supervise.spawn(repo, "0.9.0", settings, binary=fake_claude)
+    handle = sr.supervisor.handle
+    assert handle is not None
+    daemon.binary_version = "1.0.0"  # version drift
+
+    engine = subprocess.Popen(["sleep", "30"])
+    try:
+        write_session(
+            engine.pid, "sess-rc", str(repo / "wt"), int(time.time() * 1000), entrypoint="sdk-cli"
+        )
+        daemon.converge(repo, sr, sessions=[])
+    finally:
+        engine.kill()
+        engine.wait()
+
+    assert daemon.fleet[repo].supervisor is not None
+    assert handle.poll() is None  # still running: the environment was not lost
+    assert "would lose" in sr.warnings[WarningKind.DRIFT]
+    handle.terminate()
 
 
 # ── snapshot round trip ─────────────────────────────────────────────────────
