@@ -110,4 +110,5 @@ CLI's platform-specific `procStart` value.
   the session busy. Dirty files survive either way; the session itself may not.
 - `create_session_in_dir = false` costs version convergence: drift restarts
   wait for the repo's sessions to end, because without an in-dir session a
-  restart would lose them. `status` reports the deferral.
+  restart would lose them. `status` reports the deferral, and archiving the
+  sessions releases it.
