@@ -58,13 +58,21 @@ Stopping a supervisor — for drift or for retirement — requires both:
 | Gate | Question | Cost when wrong |
 |---|---|---|
 | quiet | Has every session been transcript-silent for the quiet window? | that session's current turn |
-| survival | Is there an in-dir session, or no sessions at all? | the whole environment |
+| survival | Is a session still sitting in the repo root, or are there no sessions at all? | the whole environment |
+
+The survival gate asks about the anchor that exists *now*, not the one the
+supervisor was launched to create. `--create-session-in-dir` in a running
+process's argv records the request, not the result: archiving the anchor through
+the web UI terminates its engine and the supervisor does not mint a replacement,
+so the flag can outlive the session it named. Both have to hold — launched with
+an anchor, and one still there.
 
 A repo running without an in-dir session defers until its sessions end, and
 `groundcrew status` reports the deferral. Version convergence waits on that, so
 a repo whose sessions never end stays on its launched version until a
 supervisor is replaced by hand. A deferral still standing after 24 hours raises
-an alert, and so does a stop that goes ahead with live sessions.
+an alert, and so does a stop that goes ahead with sessions that have taken a
+turn. An unused anchor is discarded silently, having no turn to lose.
 
 ## Busy sessions that read as idle
 
