@@ -239,8 +239,11 @@ class Daemon:
             alive = sr.supervisor.alive()
             live = claude_state.repo_sessions(path) if alive else []
             quiet = alive and claude_state.all_quiet(live, self.cfg.quiet_seconds, now)
-            decision = sr.plan_retirement(alive=alive, quiet=quiet, sessions=len(live))
-            if decision is Retire.FORGET:
+            decision = sr.plan_retirement(alive=alive, quiet=quiet, sessions=len(live), now=now)
+            if isinstance(decision, Alert):
+                log.warning("retirement of %s stuck: %s", path, decision.message)
+                self.alert(decision)
+            elif decision is Retire.FORGET:
                 sr.supervisor = None
             elif decision is Retire.TERMINATE:
                 log.info("retiring supervisor for unregistered %s", path)
@@ -329,9 +332,12 @@ class Daemon:
             )
         # One fresh read answers both questions: is anything mid-turn, and would
         # anything be lost with the outgoing environment.
+        now = time.time()
         live = claude_state.repo_sessions(path)
-        quiet = claude_state.all_quiet(live, self.cfg.quiet_seconds, time.time())
-        decision = sr.plan_drift(self.binary_version, probed, quiet=quiet, sessions=len(live))
+        quiet = claude_state.all_quiet(live, self.cfg.quiet_seconds, now)
+        decision = sr.plan_drift(
+            self.binary_version, probed, quiet=quiet, sessions=len(live), now=now
+        )
         if decision is None:
             return
         if isinstance(decision, Restart):
@@ -344,6 +350,8 @@ class Daemon:
             sr.supervisor = None
         else:
             log.info("%s drifted (%s); restart deferred", path.name, decision.reason)
+        if decision.alert is not None:
+            self.alert(decision.alert)
 
     def check_rollout_complete(self) -> None:
         if self.pending_rollout is None or self.pending_rollout != self.binary_version:

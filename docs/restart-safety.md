@@ -59,8 +59,8 @@ Stopping a supervisor — for drift or for retirement — requires both:
 A repo running without an in-dir session defers until its sessions end, and
 `groundcrew status` reports the deferral. Version convergence waits on that, so
 a repo whose sessions never end stays on its launched version until a
-supervisor is replaced by hand. A stop that goes ahead with live sessions
-interrupts them, and each loses the turn it was in.
+supervisor is replaced by hand. A deferral still standing after 24 hours raises
+an alert, and so does a stop that goes ahead with live sessions.
 
 ## Busy sessions that read as idle
 

@@ -42,6 +42,7 @@ from groundcrew.config import (
     CRASH_WINDOW_SECONDS,
     LOG_MAX_BYTES,
     PULL_FAILURES_BEFORE_ALERT,
+    STOP_DEFER_ALERT_SECONDS,
     TERMINATE_TIMEOUT,
     RepoSettings,
     state_dir,
@@ -364,11 +365,13 @@ class RunHook:
 @dataclass(frozen=True)
 class Restart:
     reason: str
+    alert: Alert | None = None
 
 
 @dataclass(frozen=True)
 class Defer:
     reason: str
+    alert: Alert | None = None
 
 
 @dataclass
@@ -388,6 +391,8 @@ class SupervisedRepo:
     last_pull_at: float = 0.0
     last_pull_kind: str = ""
     last_pull_detail: str = ""
+    stop_deferred_since: float = 0.0
+    stop_alerted: bool = False
     warnings: dict[WarningKind, str] = field(default_factory=dict)
 
     def strands_sessions(self, sessions: int) -> bool:
@@ -429,14 +434,21 @@ class SupervisedRepo:
             return Plan.WAIT
         return Plan.SPAWN
 
-    def plan_retirement(self, *, alive: bool, quiet: bool, sessions: int) -> Retire:
+    def plan_retirement(
+        self, *, alive: bool, quiet: bool, sessions: int, now: float
+    ) -> Retire | Alert:
         """Retiring stops a supervisor, so it uses the same two gates as drift."""
         if self.supervisor is None:
             return Retire.WAIT
         if not alive:
+            self.stop_deferred_since = 0.0
+            self.stop_alerted = False
             return Retire.FORGET
         if not quiet or self.strands_sessions(sessions):
-            return Retire.WAIT
+            stuck = self._stuck_alert(now, "retirement", f"{sessions} live session(s)")
+            return stuck if stuck is not None else Retire.WAIT
+        self.stop_deferred_since = 0.0
+        self.stop_alerted = False
         return Retire.TERMINATE
 
     # -- freshness --------------------------------------------------------
@@ -512,6 +524,7 @@ class SupervisedRepo:
         *,
         quiet: bool,
         sessions: int,
+        now: float,
     ) -> Restart | Defer | None:
         """Does the supervisor match the desired (version, args) pair? None = converged.
 
@@ -535,6 +548,8 @@ class SupervisedRepo:
         if sup.launched_args != rc_args(self.settings):
             reasons.append("args")
         if not reasons:
+            self.stop_deferred_since = 0.0
+            self.stop_alerted = False
             return None
         reason = " + ".join(reasons)
         if self.strands_sessions(sessions):
@@ -542,13 +557,40 @@ class SupervisedRepo:
                 f"drift ({reason}): restart deferred, would lose {sessions} session(s) "
                 "— no in-dir session to reconnect through"
             )
-            return Defer(reason)
+            stuck = self._stuck_alert(now, "drift restart", f"{sessions} session(s) blocking")
+            return Defer(reason, stuck)
         if not quiet:
             self.warnings[WarningKind.DRIFT] = (
                 f"drift ({reason}): restart deferred, session(s) active"
             )
-            return Defer(reason)
-        return Restart(reason)
+            stuck = self._stuck_alert(now, "drift restart", "session(s) busy")
+            return Defer(reason, stuck)
+        self.stop_deferred_since = 0.0
+        self.stop_alerted = False
+        # The environment survives, but each session still loses the turn it was
+        # in, and a session waiting on a background task reads as quiet while it
+        # waits.
+        interrupted = (
+            Alert(
+                "groundcrew: sessions interrupted",
+                f"{self.path.name}: restarting for {reason}; {sessions} session(s) interrupted",
+            )
+            if sessions
+            else None
+        )
+        return Restart(reason, interrupted)
+
+    def _stuck_alert(self, now: float, what: str, detail: str) -> Alert | None:
+        """The alert for a stop deferred past the threshold, once per deferral."""
+        if not self.stop_deferred_since:
+            self.stop_deferred_since = now
+        if self.stop_alerted or now - self.stop_deferred_since < STOP_DEFER_ALERT_SECONDS:
+            return None
+        self.stop_alerted = True
+        return Alert(
+            f"groundcrew: {what} stuck",
+            f"{self.path.name}: {what} deferred over 24h — {detail}",
+        )
 
     # -- snapshot ---------------------------------------------------------
 

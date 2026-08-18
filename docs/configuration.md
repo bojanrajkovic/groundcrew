@@ -63,8 +63,9 @@ command = ["/path/to/notifier"]
 your PATH (or point `command` at the file) and put `PUSHOVER_TOKEN` /
 `PUSHOVER_USER` in the env file. Alerts fire on: crash loops, three
 consecutive pull failures for a repo, post-pull hook failures, `claude
-update` failures, and (the one success ping) a completed fleet-wide version
-rollout.
+update` failures, a restart that interrupts live sessions, a drift restart
+still deferred after 24 hours, and (the one success ping) a completed
+fleet-wide version rollout.
 
 ## The post-pull hook
 
