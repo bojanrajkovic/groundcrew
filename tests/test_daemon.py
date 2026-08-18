@@ -207,6 +207,39 @@ def test_converge_restarts_a_real_drifted_supervisor(sandbox: Path) -> None:
     assert handle.poll() is not None  # the real process is gone
 
 
+def test_converge_spares_a_drifted_supervisor_that_would_lose_its_sessions(
+    sandbox: Path,
+) -> None:
+    """Without an in-dir session, a quiet session dies with the environment."""
+    write_config(sandbox, "[timing]\nquiet_seconds = 0\n")  # quiet is satisfied
+    fake_claude = script(sandbox / "fake-claude", "exec sleep 30")
+    repo = sandbox / "projects" / "repo"
+    repo.mkdir()
+    settings = RepoSettings(create_session_in_dir=False)
+    daemon = Daemon(config.load())
+    sr = daemon.repo(repo)
+    sr.settings = settings
+    sr.supervisor = supervise.spawn(repo, "0.9.0", settings, binary=fake_claude)
+    handle = sr.supervisor.handle
+    assert handle is not None
+    daemon.binary_version = "1.0.0"  # version drift
+
+    engine = subprocess.Popen(["sleep", "30"])
+    try:
+        write_session(
+            engine.pid, "sess-rc", str(repo / "wt"), int(time.time() * 1000), entrypoint="sdk-cli"
+        )
+        daemon.converge(repo, sr, sessions=[])
+    finally:
+        engine.kill()
+        engine.wait()
+
+    assert daemon.fleet[repo].supervisor is not None
+    assert handle.poll() is None  # still running: the environment was not lost
+    assert "would lose" in sr.warnings[WarningKind.DRIFT]
+    handle.terminate()
+
+
 # ── snapshot round trip ─────────────────────────────────────────────────────
 
 

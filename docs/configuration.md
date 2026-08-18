@@ -32,6 +32,12 @@ root) — with per-repo overrides in `[repos."<path>"]` tables (any
 `[claude]` key except `bin`, plus `post_pull`). Changing them takes effect through drift: restart the
 daemon and each affected supervisor converges once its sessions are quiet.
 
+`create_session_in_dir` also decides whether a supervisor restart keeps its
+cloud environment, since the replacement reconnects through the in-dir session.
+Setting it to `false` keeps every session in an isolated worktree and leaves the
+repo root untouched, at the cost of making restarts destructive — so stops then
+wait for the repo's sessions to end. See [restart-safety.md](restart-safety.md).
+
 Environment variables override everything, mainly for tests:
 `GROUNDCREW_ROOT`, `GROUNDCREW_CONFIG_DIR`, `GROUNDCREW_REGISTRY`,
 `GROUNDCREW_STATE`, `GROUNDCREW_CLAUDE_HOME`, `GROUNDCREW_CLAUDE_JSON`.

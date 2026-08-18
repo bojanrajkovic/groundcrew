@@ -107,12 +107,24 @@ def test_third_crash_in_window_trips_breaker_with_alert() -> None:
 
 def test_retirement_decisions() -> None:
     repo = entity()
-    assert repo.plan_retirement(alive=False, quiet=True) is Retire.WAIT  # nothing to retire
+    # nothing to retire
+    assert repo.plan_retirement(alive=False, quiet=True, sessions=0) is Retire.WAIT
 
     repo.supervisor = supervisor()
-    assert repo.plan_retirement(alive=True, quiet=False) is Retire.WAIT
-    assert repo.plan_retirement(alive=True, quiet=True) is Retire.TERMINATE
-    assert repo.plan_retirement(alive=False, quiet=False) is Retire.FORGET
+    assert repo.plan_retirement(alive=True, quiet=False, sessions=0) is Retire.WAIT
+    assert repo.plan_retirement(alive=True, quiet=True, sessions=0) is Retire.TERMINATE
+    assert repo.plan_retirement(alive=False, quiet=False, sessions=0) is Retire.FORGET
+
+
+def test_retirement_waits_rather_than_stranding_sessions() -> None:
+    """Un-registering a repo does not license losing its environment."""
+    repo = entity()
+    repo.supervisor = supervisor(RepoSettings(create_session_in_dir=False))
+
+    assert repo.plan_retirement(alive=True, quiet=True, sessions=1) is Retire.WAIT
+    # with an in-dir session, unaffected
+    repo.supervisor = supervisor()
+    assert repo.plan_retirement(alive=True, quiet=True, sessions=1) is Retire.TERMINATE
 
 
 # ── freshness ───────────────────────────────────────────────────────────────
@@ -235,14 +247,14 @@ def test_converged_supervisor_needs_nothing() -> None:
     repo = entity()
     repo.supervisor = supervisor()
 
-    assert repo.plan_drift("1.0.0", None, quiet=True) is None
+    assert repo.plan_drift("1.0.0", None, quiet=True, sessions=0) is None
 
 
 def test_version_drift_restarts_when_quiet() -> None:
     repo = entity()
     repo.supervisor = supervisor(version="0.9.0")
 
-    decision = repo.plan_drift("1.0.0", None, quiet=True)
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=0)
 
     assert isinstance(decision, Restart)
     assert "0.9.0 -> 1.0.0" in decision.reason
@@ -252,7 +264,7 @@ def test_args_drift_restarts_when_quiet() -> None:
     repo = entity(RepoSettings(capacity=4))
     repo.supervisor = supervisor()  # args for default capacity 32
 
-    decision = repo.plan_drift("1.0.0", None, quiet=True)
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=0)
 
     assert isinstance(decision, Restart)
     assert decision.reason == "args"
@@ -262,7 +274,7 @@ def test_combined_drift_names_both_reasons() -> None:
     repo = entity(RepoSettings(capacity=4))
     repo.supervisor = supervisor(version="0.9.0")
 
-    decision = repo.plan_drift("1.0.0", None, quiet=True)
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=0)
 
     assert isinstance(decision, Restart)
     assert "version" in decision.reason
@@ -273,13 +285,13 @@ def test_drift_defers_with_warning_while_busy_and_clears_when_converged() -> Non
     repo = entity()
     repo.supervisor = supervisor(version="0.9.0")
 
-    decision = repo.plan_drift("1.0.0", None, quiet=False)
+    decision = repo.plan_drift("1.0.0", None, quiet=False, sessions=0)
 
     assert isinstance(decision, Defer)
     assert WarningKind.DRIFT in repo.warnings
     # converged (e.g. after the shell restarted it): warning clears
     repo.supervisor = supervisor(version="1.0.0")
-    assert repo.plan_drift("1.0.0", None, quiet=True) is None
+    assert repo.plan_drift("1.0.0", None, quiet=True, sessions=0) is None
     assert WarningKind.DRIFT not in repo.warnings
 
 
@@ -287,7 +299,7 @@ def test_probed_version_fills_the_adoption_hole() -> None:
     repo = entity()
     repo.supervisor = supervisor(version=None)  # adopted: version unknown
 
-    assert repo.plan_drift("1.0.0", "1.0.0", quiet=True) is None
+    assert repo.plan_drift("1.0.0", "1.0.0", quiet=True, sessions=0) is None
     assert repo.supervisor.launched_version == "1.0.0"
 
 
@@ -295,9 +307,54 @@ def test_unprobeable_version_counts_as_drift() -> None:
     repo = entity()
     repo.supervisor = supervisor(version=None)
 
-    decision = repo.plan_drift("1.0.0", None, quiet=True)
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=0)
 
     assert isinstance(decision, Restart)
+
+
+# Without an in-dir session a restart loses the environment, so quiet is not
+# enough — see docs/restart-safety.md.
+
+
+def test_repo_without_an_in_dir_session_defers_while_any_session_lives() -> None:
+    settings = RepoSettings(create_session_in_dir=False)
+    repo = entity(settings)
+    repo.supervisor = supervisor(settings, version="0.9.0")
+
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=2)
+
+    assert isinstance(decision, Defer)
+    assert "would lose" in repo.warnings[WarningKind.DRIFT]
+
+
+def test_repo_without_an_in_dir_session_restarts_once_sessions_end() -> None:
+    settings = RepoSettings(create_session_in_dir=False)
+    repo = entity(settings)
+    repo.supervisor = supervisor(settings, version="0.9.0")
+
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=0)
+
+    assert isinstance(decision, Restart)
+
+
+def test_repo_with_an_in_dir_session_restarts_with_sessions_present() -> None:
+    repo = entity()  # create_session_in_dir defaults on
+    repo.supervisor = supervisor(version="0.9.0")
+
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=3)
+
+    assert isinstance(decision, Restart)
+
+
+def test_in_dir_session_is_read_from_the_running_supervisor_not_the_settings() -> None:
+    """Config flipped on, but the live process was launched without one."""
+    repo = entity()  # settings now want create_session_in_dir on
+    repo.supervisor = supervisor(RepoSettings(create_session_in_dir=False))
+
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=1)
+
+    assert isinstance(decision, Defer)
+    assert "would lose" in repo.warnings[WarningKind.DRIFT]
 
 
 # ── warning lifecycle across passes ─────────────────────────────────────────
@@ -306,7 +363,7 @@ def test_unprobeable_version_counts_as_drift() -> None:
 def test_freshness_pass_never_erases_the_drift_warning() -> None:
     repo = entity()
     repo.supervisor = supervisor(version="0.9.0")
-    repo.plan_drift("1.0.0", None, quiet=False)
+    repo.plan_drift("1.0.0", None, quiet=False, sessions=0)
     assert WarningKind.DRIFT in repo.warnings
 
     repo.plan_freshness(root_sessions=0)

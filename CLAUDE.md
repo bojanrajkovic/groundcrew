@@ -2,7 +2,8 @@
 
 Fleet daemon keeping `claude remote-control` environments alive across local
 repos. Read `docs/architecture.md` before changing daemon or supervision
-behavior; `docs/install.md` covers deployment and `docs/configuration.md`
+behavior, and `docs/restart-safety.md` before changing anything that stops a
+supervisor; `docs/install.md` covers deployment and `docs/configuration.md`
 the config surface.
 
 Quality gate: `uv run ruff check src tests && uv run mypy src tests && uv run pytest`.

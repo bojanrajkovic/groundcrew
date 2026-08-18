@@ -2,11 +2,13 @@
 
 Loop shape:
 - every POLL_SECONDS: reconcile the fleet against the registry (spawn missing,
-  respawn dead with crash-loop backoff, retire unregistered when quiet), then
-  persist a state snapshot for `groundcrew status`.
+  respawn dead with crash-loop backoff, retire unregistered when stopping is
+  safe), then persist a state snapshot for `groundcrew status`.
 - every TICK_SECONDS: per repo — freshness pull, the post-pull hook when the
-  default branch moved in-tree, and a drift restart once every session in the
-  repo has been transcript-quiet for QUIET_SECONDS.
+  default branch moved in-tree, and a drift restart once stopping is safe.
+
+Stopping a supervisor is safe when every session has been transcript-quiet for
+QUIET_SECONDS and none would be lost by the stop; see docs/restart-safety.md.
 - nightly at NIGHTLY_HOUR: `claude update` as a backstop for the auto-updater.
 
 Per ADR 0004 the shell performs effects and observations; every decision
@@ -235,8 +237,9 @@ class Daemon:
             if path in registry or sr.supervisor is None:
                 continue
             alive = sr.supervisor.alive()
-            quiet = alive and claude_state.repo_quiet(path, self.cfg.quiet_seconds, now)
-            decision = sr.plan_retirement(alive=alive, quiet=quiet)
+            live = claude_state.repo_sessions(path) if alive else []
+            quiet = alive and claude_state.all_quiet(live, self.cfg.quiet_seconds, now)
+            decision = sr.plan_retirement(alive=alive, quiet=quiet, sessions=len(live))
             if decision is Retire.FORGET:
                 sr.supervisor = None
             elif decision is Retire.TERMINATE:
@@ -324,8 +327,11 @@ class Daemon:
                 (s.version for s in claude_state.rc_sessions_for(path, sessions) if s.version),
                 None,
             )
-        quiet = claude_state.repo_quiet(path, self.cfg.quiet_seconds, time.time())
-        decision = sr.plan_drift(self.binary_version, probed, quiet=quiet)
+        # One fresh read answers both questions: is anything mid-turn, and would
+        # anything be lost with the outgoing environment.
+        live = claude_state.repo_sessions(path)
+        quiet = claude_state.all_quiet(live, self.cfg.quiet_seconds, time.time())
+        decision = sr.plan_drift(self.binary_version, probed, quiet=quiet, sessions=len(live))
         if decision is None:
             return
         if isinstance(decision, Restart):
@@ -337,7 +343,7 @@ class Daemon:
             # cannot stampede the registration rate limit.
             sr.supervisor = None
         else:
-            log.info("%s drifted (%s) but session(s) active; deferring", path.name, decision.reason)
+            log.info("%s drifted (%s); restart deferred", path.name, decision.reason)
 
     def check_rollout_complete(self) -> None:
         if self.pending_rollout is None or self.pending_rollout != self.binary_version:

@@ -28,6 +28,9 @@ BACKOFF_SECONDS = 30 * 60
 # the rejected supervisors exit; ramp spawns instead of stampeding.
 MAX_SPAWNS_PER_PASS = 3
 PULL_FAILURES_BEFORE_ALERT = 3
+# A deferred stop is normal. One still deferred a day later means the repo is
+# stuck on its launched version.
+STOP_DEFER_ALERT_SECONDS = 24 * 3600
 GIT_TIMEOUT = 120
 POST_PULL_TIMEOUT = 600
 UPDATE_TIMEOUT = 600
