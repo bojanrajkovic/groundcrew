@@ -38,6 +38,10 @@ preserved.` on exit. This works after SIGKILL as well as SIGTERM.
 The environment survives; an on-demand worktree session may not. Treat a
 restart as costing every session it interrupts.
 
+The anchor session is otherwise inert, and the rest of the daemon treats it that
+way: a freshness pull defers to a root session only while that session is
+working, so an idle anchor never blocks one.
+
 With `create_session_in_dir = false` there is no session in the repo root.
 Every start registers a new environment and abandons the previous one's
 sessions. Their worktrees stay on disk with nothing that owns them, and neither

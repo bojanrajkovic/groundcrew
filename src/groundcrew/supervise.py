@@ -453,13 +453,16 @@ class SupervisedRepo:
 
     # -- freshness --------------------------------------------------------
 
-    def plan_freshness(self, root_sessions: int) -> Fresh:
+    def plan_freshness(self, working_sessions: int) -> Fresh:
         """May the shell pull? A pull rewrites the main checkout.
 
-        What blocks it is a session working in that checkout. `spawn` only
+        What blocks it is a session *working* in that checkout. `spawn` only
         approximates that: same-dir puts every session there, and worktree mode
-        still leaves the in-dir session there. The shell counts sessions whose
-        cwd is the repo root, so no launch setting is re-derived here.
+        still leaves the in-dir session there. Presence alone overshoots in the
+        other direction, since `create_session_in_dir` parks an idle anchor
+        session in the root and never takes it away. The shell counts root
+        sessions that are not quiet, so neither a launch setting nor an idle
+        anchor is re-derived here.
         """
         for kind in (
             WarningKind.PARKED,
@@ -470,9 +473,9 @@ class SupervisedRepo:
             WarningKind.DEFERRED,
         ):
             self.warnings.pop(kind, None)
-        if root_sessions:
+        if working_sessions:
             self.warnings[WarningKind.DEFERRED] = (
-                f"deferred: pull skipped, {root_sessions} live session(s) share the working tree"
+                f"deferred: pull skipped, {working_sessions} session(s) working in the tree"
             )
             return Fresh.SKIP
         return Fresh.PULL

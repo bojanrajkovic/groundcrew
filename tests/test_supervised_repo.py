@@ -146,24 +146,28 @@ def test_stuck_retirement_alerts_once() -> None:
 
 
 def test_sessions_confined_to_worktrees_never_block_a_pull() -> None:
-    assert entity().plan_freshness(root_sessions=0) is Fresh.PULL
+    assert entity().plan_freshness(working_sessions=0) is Fresh.PULL
 
 
-def test_pull_defers_while_a_session_shares_the_main_checkout() -> None:
+def test_pull_defers_while_a_session_works_in_the_main_checkout() -> None:
     repo = entity(RepoSettings(spawn="same-dir"))
 
-    assert repo.plan_freshness(root_sessions=2) is Fresh.SKIP
-    assert "2 live session(s)" in repo.warnings[WarningKind.DEFERRED]
-    # sessions gone → pull again, deferral warning cleared
-    assert repo.plan_freshness(root_sessions=0) is Fresh.PULL
+    assert repo.plan_freshness(working_sessions=2) is Fresh.SKIP
+    assert "2 session(s) working" in repo.warnings[WarningKind.DEFERRED]
+    # sessions idle or gone → pull again, deferral warning cleared
+    assert repo.plan_freshness(working_sessions=0) is Fresh.PULL
     assert WarningKind.DEFERRED not in repo.warnings
 
 
-def test_in_dir_session_blocks_a_pull_in_a_worktree_repo() -> None:
-    """spawn mode does not decide this: worktree repos have an in-dir session too."""
+def test_a_working_in_dir_session_blocks_a_pull_in_a_worktree_repo() -> None:
+    """spawn mode does not decide this: worktree repos have an in-dir session too.
+
+    Counting which of them are working is the shell's job; the entity is handed
+    the count, so an idle anchor reaches here as zero.
+    """
     repo = entity()  # spawn="worktree", create_session_in_dir on
 
-    assert repo.plan_freshness(root_sessions=1) is Fresh.SKIP
+    assert repo.plan_freshness(working_sessions=1) is Fresh.SKIP
 
 
 def pull_outcome(
@@ -430,7 +434,7 @@ def test_freshness_pass_never_erases_the_drift_warning() -> None:
     repo.plan_drift("1.0.0", None, quiet=False, sessions=0, now=NOW)
     assert WarningKind.DRIFT in repo.warnings
 
-    repo.plan_freshness(root_sessions=0)
+    repo.plan_freshness(working_sessions=0)
     repo.on_pull(pull_outcome(PullKind.FF_PULLED), NOW)
 
     assert WarningKind.DRIFT in repo.warnings

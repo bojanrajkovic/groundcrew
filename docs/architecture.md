@@ -76,7 +76,12 @@ stale arguments converge as args-drift.
 A freshness pull rewrites the main checkout, so it is skipped whenever a live
 session is working *in* that checkout — every session under `spawn =
 "same-dir"`, and the in-dir session under `spawn = "worktree"`. The session's
-own cwd decides it; no launch setting is re-derived.
+own cwd decides which sessions are candidates; no launch setting is re-derived.
+
+Sharing the directory is not enough to block one. `create_session_in_dir` parks
+an anchor session in the repo root for the supervisor's whole life, so deferring
+to its mere presence would stop the fleet pulling at all. A root session blocks
+the pull only while it is not quiet, by the same measure drift restarts use.
 
 Pull policy: on the default branch and clean → `git pull --ff-only`; parked on
 another branch → `git fetch origin <default>:<default>` (updates the ref,
