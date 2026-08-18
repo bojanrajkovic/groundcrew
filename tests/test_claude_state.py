@@ -6,30 +6,10 @@ import subprocess
 import time
 from pathlib import Path
 
+from conftest import write_session
+
 from groundcrew import claude_state
 from groundcrew.config import claude_home, claude_json_path
-
-
-def write_session(
-    pid: int,
-    session_id: str,
-    cwd: str,
-    started_at_ms: int,
-    *,
-    entrypoint: str | None = None,
-) -> None:
-    sessions = claude_home() / "sessions"
-    sessions.mkdir(parents=True, exist_ok=True)
-    data: dict[str, object] = {
-        "pid": pid,
-        "sessionId": session_id,
-        "cwd": cwd,
-        "startedAt": started_at_ms,
-        "version": "2.1.233",
-    }
-    if entrypoint is not None:
-        data["entrypoint"] = entrypoint
-    (sessions / f"{pid}.json").write_text(json.dumps(data))
 
 
 def test_seed_trust_preserves_other_content(sandbox: Path) -> None:

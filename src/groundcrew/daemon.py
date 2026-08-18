@@ -275,9 +275,11 @@ class Daemon:
             self.binary_version = version
 
     def freshen(self, path: Path, sr: SupervisedRepo, now: float) -> None:
-        # Only same-dir entities decide on session presence; skip the read otherwise.
-        count = len(claude_state.repo_sessions(path)) if sr.settings.spawn == "same-dir" else 0
-        if sr.plan_freshness(session_count=count) is Fresh.SKIP:
+        # A pull rewrites the main checkout, so it must wait on sessions working
+        # in it: same-dir sessions and the in-dir session alike. Their cwd
+        # answers that directly; spawn mode only approximates it.
+        root_sessions = sum(1 for s in claude_state.repo_sessions(path) if s.cwd == path)
+        if sr.plan_freshness(root_sessions=root_sessions) is Fresh.SKIP:
             return
         outcome = gitops.pull(path)
         decision = sr.on_pull(outcome, now)

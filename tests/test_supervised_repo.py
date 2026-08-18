@@ -118,18 +118,25 @@ def test_retirement_decisions() -> None:
 # ── freshness ───────────────────────────────────────────────────────────────
 
 
-def test_worktree_repos_always_pull() -> None:
-    assert entity().plan_freshness(session_count=5) is Fresh.PULL
+def test_sessions_confined_to_worktrees_never_block_a_pull() -> None:
+    assert entity().plan_freshness(root_sessions=0) is Fresh.PULL
 
 
-def test_same_dir_repo_defers_while_sessions_live() -> None:
+def test_pull_defers_while_a_session_shares_the_main_checkout() -> None:
     repo = entity(RepoSettings(spawn="same-dir"))
 
-    assert repo.plan_freshness(session_count=2) is Fresh.SKIP
+    assert repo.plan_freshness(root_sessions=2) is Fresh.SKIP
     assert "2 live session(s)" in repo.warnings[WarningKind.DEFERRED]
     # sessions gone → pull again, deferral warning cleared
-    assert repo.plan_freshness(session_count=0) is Fresh.PULL
+    assert repo.plan_freshness(root_sessions=0) is Fresh.PULL
     assert WarningKind.DEFERRED not in repo.warnings
+
+
+def test_in_dir_session_blocks_a_pull_in_a_worktree_repo() -> None:
+    """spawn mode does not decide this: worktree repos have an in-dir session too."""
+    repo = entity()  # spawn="worktree", create_session_in_dir on
+
+    assert repo.plan_freshness(root_sessions=1) is Fresh.SKIP
 
 
 def pull_outcome(
@@ -302,7 +309,7 @@ def test_freshness_pass_never_erases_the_drift_warning() -> None:
     repo.plan_drift("1.0.0", None, quiet=False)
     assert WarningKind.DRIFT in repo.warnings
 
-    repo.plan_freshness(session_count=0)
+    repo.plan_freshness(root_sessions=0)
     repo.on_pull(pull_outcome(PullKind.FF_PULLED), NOW)
 
     assert WarningKind.DRIFT in repo.warnings

@@ -423,8 +423,14 @@ class SupervisedRepo:
 
     # -- freshness --------------------------------------------------------
 
-    def plan_freshness(self, session_count: int) -> Fresh:
-        """May the shell pull? same-dir sessions share the working tree."""
+    def plan_freshness(self, root_sessions: int) -> Fresh:
+        """May the shell pull? A pull rewrites the main checkout.
+
+        What blocks it is a session working in that checkout. `spawn` only
+        approximates that: same-dir puts every session there, and worktree mode
+        still leaves the in-dir session there. The shell counts sessions whose
+        cwd is the repo root, so no launch setting is re-derived here.
+        """
         for kind in (
             WarningKind.PARKED,
             WarningKind.DIRTY,
@@ -434,9 +440,9 @@ class SupervisedRepo:
             WarningKind.DEFERRED,
         ):
             self.warnings.pop(kind, None)
-        if self.settings.spawn == "same-dir" and session_count > 0:
+        if root_sessions:
             self.warnings[WarningKind.DEFERRED] = (
-                f"deferred: pull skipped, {session_count} live session(s) share the working tree"
+                f"deferred: pull skipped, {root_sessions} live session(s) share the working tree"
             )
             return Fresh.SKIP
         return Fresh.PULL

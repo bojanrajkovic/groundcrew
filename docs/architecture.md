@@ -69,9 +69,10 @@ daemon restart is free (children survive and are re-adopted, hand-started
 supervisors included, whatever their spawn mode) and adopted supervisors with
 stale arguments converge as args-drift.
 
-Repos configured with `spawn = "same-dir"` run every session in the repo
-root, so freshness pulls are skipped whenever such a repo has any live
-session — quiet is not enough when the working tree is shared.
+A freshness pull rewrites the main checkout, so it is skipped whenever a live
+session is working *in* that checkout — every session under `spawn =
+"same-dir"`, and the in-dir session under `spawn = "worktree"`. The session's
+own cwd decides it; no launch setting is re-derived.
 
 Pull policy: on the default branch and clean → `git pull --ff-only`; parked on
 another branch → `git fetch origin <default>:<default>` (updates the ref,
