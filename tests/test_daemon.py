@@ -89,10 +89,10 @@ def test_freshen_runs_hook_in_repo_after_branch_move(sandbox: Path) -> None:
     assert marker.read_text().strip() == str(repo)
 
 
-def test_freshen_skips_the_pull_while_a_session_sits_in_the_main_checkout(
+def test_freshen_skips_the_pull_while_a_session_works_in_the_main_checkout(
     sandbox: Path,
 ) -> None:
-    """A worktree repo still has an in-dir session, and a pull would move it."""
+    """A session mid-turn in the checkout would have the tree moved under it."""
     root = sandbox / "projects"
     origin = make_repo(root / "origin")
     repo = clone(origin, root / "repo")
@@ -116,6 +116,39 @@ def test_freshen_skips_the_pull_while_a_session_sits_in_the_main_checkout(
 
     assert git(repo, "rev-parse", "HEAD").stdout.strip() == before
     assert WarningKind.DEFERRED in daemon.repo(repo).warnings
+
+
+def test_freshen_pulls_past_an_idle_in_dir_session(sandbox: Path) -> None:
+    """`create_session_in_dir` parks an anchor session in the root for the
+
+    supervisor's whole life. Blocking on its presence would retire the pull
+    entirely; only a session actually working there may block one.
+    """
+    root = sandbox / "projects"
+    origin = make_repo(root / "origin")
+    repo = clone(origin, root / "repo")
+    add_origin_commit(origin)
+    before = git(repo, "rev-parse", "HEAD").stdout.strip()
+    daemon = Daemon(config.load())  # spawn defaults to worktree
+
+    engine = subprocess.Popen(["sleep", "30"])
+    try:
+        # startedAt is written after the child exists, or live_sessions drops it
+        # as a PID-reuse leftover. Idleness comes from advancing now instead.
+        write_session(
+            engine.pid,
+            "sess-anchor",
+            str(repo),
+            int(time.time() * 1000),
+            entrypoint="sdk-cli",
+        )
+        daemon.freshen(repo, daemon.repo(repo), time.time() + config.QUIET_SECONDS + 60)
+    finally:
+        engine.kill()
+        engine.wait()
+
+    assert git(repo, "rev-parse", "HEAD").stdout.strip() != before
+    assert WarningKind.DEFERRED not in daemon.repo(repo).warnings
 
 
 def test_freshen_hook_failure_reaches_the_real_notifier(sandbox: Path) -> None:

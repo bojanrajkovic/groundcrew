@@ -283,9 +283,16 @@ class Daemon:
     def freshen(self, path: Path, sr: SupervisedRepo, now: float) -> None:
         # A pull rewrites the main checkout, so it must wait on sessions working
         # in it: same-dir sessions and the in-dir session alike. Their cwd
-        # answers that directly; spawn mode only approximates it.
-        root_sessions = sum(1 for s in claude_state.repo_sessions(path) if s.cwd == path)
-        if sr.plan_freshness(root_sessions=root_sessions) is Fresh.SKIP:
+        # answers that directly; spawn mode only approximates it. Presence alone
+        # overshoots: create_session_in_dir parks an idle anchor session in the
+        # root for the supervisor's whole life, and deferring to it would retire
+        # the pull altogether.
+        working = sum(
+            1
+            for s in claude_state.repo_sessions(path)
+            if s.cwd == path and not claude_state.session_quiet(s, self.cfg.quiet_seconds, now)
+        )
+        if sr.plan_freshness(working_sessions=working) is Fresh.SKIP:
             return
         outcome = gitops.pull(path)
         decision = sr.on_pull(outcome, now)
