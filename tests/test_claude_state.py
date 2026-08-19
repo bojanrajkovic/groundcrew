@@ -112,6 +112,29 @@ def transcript_for(session_id: str, *lines: str) -> Path:
     return path
 
 
+def test_an_unused_anchor_session_has_had_no_turns(sandbox: Path) -> None:
+    """`create_session_in_dir` opens a transcript and may never write to it."""
+    transcripts = claude_home() / "projects" / "-repo"
+    transcripts.mkdir(parents=True, exist_ok=True)
+    (transcripts / "sess-anchor.jsonl").write_text("")  # opened, never used
+    anchor = claude_state.SessionInfo(1, "sess-anchor", Path("/repo"), started_at=0, version=None)
+
+    assert not claude_state.has_turns(anchor)
+
+
+def test_a_session_that_has_written_a_turn_reports_one(sandbox: Path) -> None:
+    transcript_for("sess-used", '{"content": "hello"}')
+    used = claude_state.SessionInfo(2, "sess-used", Path("/repo"), started_at=0, version=None)
+
+    assert claude_state.has_turns(used)
+
+
+def test_a_session_with_no_transcript_at_all_has_had_no_turns(sandbox: Path) -> None:
+    absent = claude_state.SessionInfo(3, "sess-none", Path("/repo"), started_at=0, version=None)
+
+    assert not claude_state.has_turns(absent)
+
+
 def test_a_session_waiting_on_a_background_task_is_never_quiet(sandbox: Path) -> None:
     path = transcript_for("sess-bg", LAUNCH.format(tid="b64gw58x8"))
     session = claude_state.SessionInfo(1, "sess-bg", Path("/repo"), started_at=0, version=None)

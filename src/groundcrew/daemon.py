@@ -60,6 +60,19 @@ from groundcrew.supervise import (
 log = logging.getLogger("groundcrew")
 
 
+def census(repo: Path, live: list[claude_state.SessionInfo]) -> supervise.SessionCensus:
+    """Summarise one session read for the stop gates.
+
+    An unused in-dir anchor counts in `total` — losing it is still losing a
+    session — but not in `working`, because it has no turn to interrupt.
+    """
+    return supervise.SessionCensus(
+        total=len(live),
+        working=sum(1 for s in live if claude_state.has_turns(s)),
+        anchored=any(s.cwd == repo for s in live),
+    )
+
+
 def notify(
     command: tuple[str, ...], title: str, message: str, timeout: float = NOTIFY_TIMEOUT
 ) -> None:
@@ -239,7 +252,9 @@ class Daemon:
             alive = sr.supervisor.alive()
             live = claude_state.repo_sessions(path) if alive else []
             quiet = alive and claude_state.all_quiet(live, self.cfg.quiet_seconds, now)
-            decision = sr.plan_retirement(alive=alive, quiet=quiet, sessions=len(live), now=now)
+            decision = sr.plan_retirement(
+                alive=alive, quiet=quiet, sessions=census(path, live), now=now
+            )
             if isinstance(decision, Alert):
                 log.warning("retirement of %s stuck: %s", path, decision.message)
                 self.alert(decision)
@@ -337,13 +352,14 @@ class Daemon:
                 (s.version for s in claude_state.rc_sessions_for(path, sessions) if s.version),
                 None,
             )
-        # One fresh read answers both questions: is anything mid-turn, and would
-        # anything be lost with the outgoing environment.
+        # One fresh read answers every question the stop gates ask: is anything
+        # mid-turn, would anything be lost with the outgoing environment, and is
+        # any of it work worth reporting as interrupted.
         now = time.time()
         live = claude_state.repo_sessions(path)
         quiet = claude_state.all_quiet(live, self.cfg.quiet_seconds, now)
         decision = sr.plan_drift(
-            self.binary_version, probed, quiet=quiet, sessions=len(live), now=now
+            self.binary_version, probed, quiet=quiet, sessions=census(path, live), now=now
         )
         if decision is None:
             return

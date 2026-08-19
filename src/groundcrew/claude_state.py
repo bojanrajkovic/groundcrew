@@ -196,6 +196,23 @@ def pending_tasks(session: SessionInfo) -> set[str]:
     return launched - finished
 
 
+def has_turns(session: SessionInfo) -> bool:
+    """Has this session ever taken a turn, or is it an unused placeholder?
+
+    `create_session_in_dir` pre-creates an anchor session to hold the
+    environment across a restart. It opens a transcript and, unless somebody
+    works in the repo root, never writes to it. Such a session has no turn for a
+    restart to interrupt, so counting it as one cries wolf.
+    """
+    for transcript in claude_home().glob(f"projects/*/{session.session_id}.jsonl"):
+        try:
+            if transcript.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def session_quiet(session: SessionInfo, quiet_seconds: float, now: float) -> bool:
     """Is this session idle, rather than merely silent?
 

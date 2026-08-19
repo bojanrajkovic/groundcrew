@@ -73,6 +73,21 @@ def rc_args(settings: RepoSettings) -> tuple[str, ...]:
     )
 
 
+@dataclass(frozen=True)
+class SessionCensus:
+    """One read of a repo's sessions, answering every question a stop gate asks.
+
+    `working` counts the sessions that have taken a turn. An unused
+    `create_session_in_dir` anchor is live but has no turn to interrupt, so it
+    belongs in `total` and not in `working`. `anchored` says a session still sits
+    in the repo root for a replacement supervisor to reconnect through.
+    """
+
+    total: int = 0
+    working: int = 0
+    anchored: bool = field(default=False, kw_only=True)
+
+
 @dataclass
 class Supervisor:
     repo: Path
@@ -395,15 +410,22 @@ class SupervisedRepo:
     stop_alerted: bool = False
     warnings: dict[WarningKind, str] = field(default_factory=dict)
 
-    def strands_sessions(self, sessions: int) -> bool:
+    def strands_sessions(self, census: SessionCensus) -> bool:
         """Would stopping this supervisor lose sessions rather than interrupt them?
 
-        Read from the running process, not from `settings`: changing the config
-        does not add an in-dir session to a supervisor already running without
-        one. See docs/restart-safety.md.
+        Both halves have to hold for a restart to be recoverable: the supervisor
+        was launched to create an in-dir session, and one is still there. argv
+        alone answers only the first — it records what was asked for at startup,
+        not what survived, and archiving the anchor through the web UI leaves the
+        flag behind with nothing under it. `settings` answers neither, since
+        changing config does not add an anchor to a running supervisor.
+        See docs/restart-safety.md.
         """
         sup = self.supervisor
-        return bool(sessions) and sup is not None and NO_IN_DIR_SESSION in sup.launched_args
+        if sup is None:
+            return False
+        launched_anchored = NO_IN_DIR_SESSION not in sup.launched_args
+        return bool(census.total) and not (launched_anchored and census.anchored)
 
     # -- supervision ------------------------------------------------------
 
@@ -435,7 +457,7 @@ class SupervisedRepo:
         return Plan.SPAWN
 
     def plan_retirement(
-        self, *, alive: bool, quiet: bool, sessions: int, now: float
+        self, *, alive: bool, quiet: bool, sessions: SessionCensus, now: float
     ) -> Retire | Alert:
         """Retiring stops a supervisor, so it uses the same two gates as drift."""
         if self.supervisor is None:
@@ -445,7 +467,7 @@ class SupervisedRepo:
             self.stop_alerted = False
             return Retire.FORGET
         if not quiet or self.strands_sessions(sessions):
-            stuck = self._stuck_alert(now, "retirement", f"{sessions} live session(s)")
+            stuck = self._stuck_alert(now, "retirement", f"{sessions.total} live session(s)")
             return stuck if stuck is not None else Retire.WAIT
         self.stop_deferred_since = 0.0
         self.stop_alerted = False
@@ -526,7 +548,7 @@ class SupervisedRepo:
         probed_version: str | None,
         *,
         quiet: bool,
-        sessions: int,
+        sessions: SessionCensus,
         now: float,
     ) -> Restart | Defer | None:
         """Does the supervisor match the desired (version, args) pair? None = converged.
@@ -557,10 +579,10 @@ class SupervisedRepo:
         reason = " + ".join(reasons)
         if self.strands_sessions(sessions):
             self.warnings[WarningKind.DRIFT] = (
-                f"drift ({reason}): restart deferred, would lose {sessions} session(s) "
+                f"drift ({reason}): restart deferred, would lose {sessions.total} session(s) "
                 "— no in-dir session to reconnect through"
             )
-            stuck = self._stuck_alert(now, "drift restart", f"{sessions} session(s) blocking")
+            stuck = self._stuck_alert(now, "drift restart", f"{sessions.total} session(s) blocking")
             return Defer(reason, stuck)
         if not quiet:
             self.warnings[WarningKind.DRIFT] = (
@@ -570,15 +592,17 @@ class SupervisedRepo:
             return Defer(reason, stuck)
         self.stop_deferred_since = 0.0
         self.stop_alerted = False
-        # The environment survives, but each session still loses the turn it was
-        # in, and a session waiting on a background task reads as quiet while it
-        # waits.
+        # The environment survives, but each session that has taken a turn loses
+        # the one it was in, and a session waiting on a background task reads as
+        # quiet while it waits. An anchor session has taken no turn at all, so
+        # discarding one is not worth an alert.
         interrupted = (
             Alert(
                 "groundcrew: sessions interrupted",
-                f"{self.path.name}: restarting for {reason}; {sessions} session(s) interrupted",
+                f"{self.path.name}: restarting for {reason}; "
+                f"{sessions.working} session(s) interrupted",
             )
-            if sessions
+            if sessions.working
             else None
         )
         return Restart(reason, interrupted)
