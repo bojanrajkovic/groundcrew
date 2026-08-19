@@ -51,6 +51,35 @@ Dirty worktrees survive either way. The CLI removes *clean* spawned worktrees
 on shutdown and keeps *dirty* ones with their branches, so uncommitted work is
 orphaned rather than destroyed.
 
+## Archiving a session
+
+Archiving a session in the web UI ends it everywhere, not just in the browser.
+The engine process exits, its metadata file under `~/.claude/sessions/` is
+removed, the supervisor's capacity drops by one, and the supervisor logs a clean
+completion rather than the failure line that normally ends a session:
+
+```
+[19:30:45] Session completed (1h 3m 18s) cse_…
+```
+
+The supervisor itself keeps running, and it does not create a replacement.
+
+```mermaid
+flowchart LR
+    S["supervisor<br>--create-session-in-dir"] --> A["in-dir session"]
+    S --> B["worktree session"]
+    A -.->|archived| X["gone, not replaced"]
+```
+
+So archiving the in-dir session leaves a supervisor whose command line still
+says `--create-session-in-dir` with no anchor behind it. The flag outlives the
+session it named, which is why the survival gate asks whether a root session
+exists rather than reading the flag.
+
+Archiving is also the way to release a stop by hand. A repo that defers
+indefinitely — sessions that never go quiet, or no anchor to reconnect through —
+converges as soon as its sessions are archived.
+
 ## The two gates
 
 Stopping a supervisor — for drift or for retirement — requires both:
@@ -62,15 +91,13 @@ Stopping a supervisor — for drift or for retirement — requires both:
 
 The survival gate asks about the anchor that exists *now*, not the one the
 supervisor was launched to create. `--create-session-in-dir` in a running
-process's argv records the request, not the result: archiving the anchor through
-the web UI terminates its engine and the supervisor does not mint a replacement,
-so the flag can outlive the session it named. Both have to hold — launched with
-an anchor, and one still there.
+process's argv records the request, not the result, and archiving leaves the
+flag behind. Both have to hold — launched with an anchor, and one still there.
 
 A repo running without an in-dir session defers until its sessions end, and
 `groundcrew status` reports the deferral. Version convergence waits on that, so
-a repo whose sessions never end stays on its launched version until a
-supervisor is replaced by hand. A deferral still standing after 24 hours raises
+a repo whose sessions never end stays on its launched version until they are
+archived or the supervisor is replaced by hand. A deferral still standing after 24 hours raises
 an alert, and so does a stop that goes ahead with sessions that have taken a
 turn. An unused anchor is discarded silently, having no turn to lose.
 
