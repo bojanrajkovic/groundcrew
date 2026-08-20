@@ -11,15 +11,20 @@ from groundcrew.config import claude_home
 
 @pytest.fixture
 def sandbox(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Point every groundcrew path at a throwaway directory."""
-    monkeypatch.setenv("GROUNDCREW_ROOT", str(tmp_path / "projects"))
-    monkeypatch.setenv("GROUNDCREW_CONFIG_DIR", str(tmp_path / "config"))
-    monkeypatch.setenv("GROUNDCREW_REGISTRY", str(tmp_path / "repos.toml"))
-    monkeypatch.setenv("GROUNDCREW_STATE", str(tmp_path / "state"))
-    monkeypatch.setenv("GROUNDCREW_CLAUDE_HOME", str(tmp_path / "claude-home"))
-    monkeypatch.setenv("GROUNDCREW_CLAUDE_JSON", str(tmp_path / "claude.json"))
-    (tmp_path / "projects").mkdir()
-    return tmp_path
+    """Point every groundcrew path at a throwaway directory.
+
+    Resolved, because the loader keys on resolved paths and macOS hands pytest
+    a `tmp_path` behind a symlink.
+    """
+    root = tmp_path.resolve()
+    monkeypatch.setenv("GROUNDCREW_ROOT", str(root / "projects"))
+    monkeypatch.setenv("GROUNDCREW_CONFIG_DIR", str(root / "config"))
+    monkeypatch.setenv("GROUNDCREW_REGISTRY", str(root / "repos.toml"))
+    monkeypatch.setenv("GROUNDCREW_STATE", str(root / "state"))
+    monkeypatch.setenv("GROUNDCREW_CLAUDE_HOME", str(root / "claude-home"))
+    monkeypatch.setenv("GROUNDCREW_CLAUDE_JSON", str(root / "claude.json"))
+    (root / "projects").mkdir()
+    return root
 
 
 def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:

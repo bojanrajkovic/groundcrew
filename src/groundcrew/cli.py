@@ -17,6 +17,7 @@ from groundcrew.config import (
     ConfigError,
     load,
     load_registry,
+    repo_path,
     save_registry,
     state_dir,
 )
@@ -28,7 +29,7 @@ def cmd_add(paths: list[str]) -> int:
     registry = load_registry()
     to_add: list[Path] = []
     for raw in paths:
-        repo = Path(raw).expanduser().resolve()
+        repo = repo_path(raw)
         if not (repo / ".git").exists():
             print(f"skip {repo}: not a git repository")
             continue
@@ -51,7 +52,7 @@ def cmd_remove(paths: list[str]) -> int:
     registry = load_registry()
     remaining = list(registry)
     for raw in paths:
-        repo = Path(raw).expanduser().resolve()
+        repo = repo_path(raw)
         if repo not in remaining:
             print(f"skip {repo}: not registered")
             continue
@@ -138,7 +139,7 @@ def cmd_status(cfg: Config) -> int:
 
 
 def cmd_clean(raw: str) -> int:
-    repo = Path(raw).expanduser().resolve()
+    repo = repo_path(raw)
     worktrees = gitops.spawned_worktrees(repo)
     if not worktrees:
         print(f"no spawned worktrees under {repo}")
@@ -171,7 +172,7 @@ def cmd_clean(raw: str) -> int:
 
 
 def cmd_logs(raw: str, lines: int, *, verbatim: bool) -> int:
-    repo = Path(raw).expanduser().resolve()
+    repo = repo_path(raw)
     path = supervise.log_path(repo)
     if not path.exists():
         print(f"no supervisor log for {repo} — has it ever been spawned?", file=sys.stderr)

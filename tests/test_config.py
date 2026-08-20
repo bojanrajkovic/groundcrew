@@ -190,6 +190,28 @@ def test_registry_defaults_into_config_dir(sandbox: Path, monkeypatch: pytest.Mo
     assert config.registry_path() == sandbox / "config" / "repos.toml"
 
 
+def test_override_key_resolves_like_a_registry_path(sandbox: Path) -> None:
+    """`add` registers the resolved path, so an override keyed by a symlink must find it."""
+    target = sandbox / "projects" / "scratch"
+    target.mkdir()
+    link = sandbox / "link-to-scratch"
+    link.symlink_to(target)
+    write_config(sandbox, f'[repos."{link}"]\nspawn = "same-dir"\n')
+
+    assert config.load().for_repo(target).spawn == "same-dir"
+
+
+def test_root_resolves_like_a_registry_path(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Discovery globs `root` and compares the hits against registered paths."""
+    real = sandbox / "real-projects"
+    real.mkdir()
+    link = sandbox / "linked-projects"
+    link.symlink_to(real)
+    monkeypatch.setenv("GROUNDCREW_ROOT", str(link))
+
+    assert config.load().root == real
+
+
 def test_status_warns_on_override_for_unregistered_repo(
     sandbox: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
