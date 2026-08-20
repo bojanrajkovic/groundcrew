@@ -145,3 +145,25 @@ def test_remove_worktree_reports_failure(tmp_path: Path) -> None:
     error = gitops.remove_worktree(repo, ghost)
 
     assert error is not None
+
+
+def test_pull_on_a_directory_git_does_not_manage(tmp_path: Path) -> None:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    outcome = gitops.pull(scratch)
+
+    assert outcome.kind is PullKind.NOT_A_REPO
+    assert not outcome.moved
+    assert not outcome.parked
+
+
+def test_is_git_repo_accepts_a_linked_worktree(tmp_path: Path) -> None:
+    """A linked worktree's `.git` is a file, so an `is_dir()` test would miss it."""
+    repo = make_repo(tmp_path / "repo")
+    worktree = tmp_path / "wt"
+    git(repo, "worktree", "add", "-q", "-b", "side", str(worktree))
+
+    assert (worktree / ".git").is_file()
+    assert gitops.is_git_repo(worktree)
+    assert not gitops.is_git_repo(tmp_path / "nowhere")

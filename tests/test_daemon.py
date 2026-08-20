@@ -179,11 +179,8 @@ def test_freshen_hook_failure_reaches_the_real_notifier(sandbox: Path) -> None:
 def test_reconcile_ramps_spawns_across_passes(sandbox: Path) -> None:
     fake_claude = script(sandbox / "fake-claude", "exec sleep 30")
     write_config(sandbox, f'[claude]\nbin = "{fake_claude}"\n')
-    registry = []
-    for i in range(5):
-        repo = sandbox / "projects" / f"repo{i}"
-        repo.mkdir()
-        registry.append(repo)
+    # real repos: the default worktree spawn mode needs one
+    registry = [make_repo(sandbox / "projects" / f"repo{i}") for i in range(5)]
     (sandbox / "claude.json").write_text("{}")
     claude_state.seed_trust(registry)
     daemon = Daemon(config.load())
@@ -466,3 +463,15 @@ def test_log_handler_uses_journal_priorities_only_under_systemd(
     plain = log_handler().format(record(logging.WARNING, "pull failing"))
     assert plain.endswith("WARNING: pull failing")
     assert not plain.startswith("<")
+
+
+def test_freshen_records_a_directory_git_does_not_manage(sandbox: Path) -> None:
+    """The scratch-directory case: nothing to pull, and status says so rather than "-"."""
+    scratch = sandbox / "projects" / "scratch"
+    scratch.mkdir()
+    daemon = Daemon(config.load())
+
+    daemon.freshen(scratch, daemon.repo(scratch), time.time())
+
+    assert daemon.repo(scratch).last_pull_kind == "not-a-repo"
+    assert daemon.repo(scratch).warnings == {}

@@ -7,9 +7,11 @@ in-flight sessions.
 ## Language
 
 **Supervised repo**:
-The unit of supervision: one registered repository together with its
+The unit of supervision: one registered directory together with its
 supervisor, sessions, freshness state, warnings, and crash history. The
 daemon is a fleet of these plus fleet-wide concerns (updates, rollouts).
+A directory git does not manage is supervised too; freshness pulls, worktree
+spawns, and parking do not apply.
 _Avoid_: runtime, repo state
 
 **Supervisor**:

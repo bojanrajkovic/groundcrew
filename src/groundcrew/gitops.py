@@ -1,6 +1,7 @@
 """Git operations: freshness pulls and worktree inspection.
 
 Pull policy (per repo, per tick):
+- not a git repository                         -> nothing to pull
 - checked out on the default branch and clean  -> `git pull --ff-only`
 - checked out elsewhere                        -> `git fetch origin <def>:<def>`
   (updates the local default-branch ref without touching the working tree)
@@ -46,6 +47,11 @@ def run_git(repo: Path, *args: str, timeout: int = GIT_TIMEOUT) -> subprocess.Co
         )
 
 
+def is_git_repo(repo: Path) -> bool:
+    """A linked worktree's `.git` is a file, not a directory, so test existence."""
+    return (repo / ".git").exists()
+
+
 def default_branch(repo: Path) -> str | None:
     head = run_git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
     if head.returncode == 0:
@@ -82,6 +88,7 @@ class PullKind(enum.Enum):
     REF_UPDATED = "ref-updated"
     FETCHED_DIRTY = "fetched-dirty"
     NO_DEFAULT_BRANCH = "no-default-branch"
+    NOT_A_REPO = "not-a-repo"  # a registered directory git does not manage
     DIVERGED = "diverged"  # local ref moved past origin; needs a human, not a retry
     FAILED = "failed"
 
@@ -106,7 +113,12 @@ def summarize(text: str, limit: int = 300) -> str:
     return " · ".join(important or lines)[:limit]
 
 
+NOT_A_REPO = PullOutcome(PullKind.NOT_A_REPO, "not a git repository", moved=False, parked=False)
+
+
 def pull(repo: Path) -> PullOutcome:
+    if not is_git_repo(repo):
+        return NOT_A_REPO
     branch = default_branch(repo)
     if branch is None:
         return PullOutcome(

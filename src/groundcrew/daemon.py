@@ -126,7 +126,7 @@ def discover_unregistered(registry: list[Path], root: Path) -> list[Path]:
         p for p in root.glob("*/*") if p.is_dir()
     ]
     for path in sorted(candidates):
-        if not (path / ".git").exists() or path in registered:
+        if not gitops.is_git_repo(path) or path in registered:
             continue
         if any(parent in registered for parent in path.parents):
             continue  # nested inside a managed repo (e.g. vendored clones)
@@ -222,7 +222,11 @@ class Daemon:
             if sr.supervisor is not None and not alive:
                 log.warning("supervisor for %s died (pid=%d)", path, sr.supervisor.pid)
             decision = sr.plan_supervision(
-                now, present=path.is_dir(), trusted=str(path) in trusted, alive=alive
+                now,
+                present=path.is_dir(),
+                trusted=str(path) in trusted,
+                git=gitops.is_git_repo(path),
+                alive=alive,
             )
             if isinstance(decision, Alert):
                 log.error("crash loop for %s; backing off", path)
@@ -307,7 +311,10 @@ class Daemon:
             for s in claude_state.repo_sessions(path)
             if s.cwd == path and not claude_state.session_quiet(s, self.cfg.quiet_seconds, now)
         )
-        if sr.plan_freshness(working_sessions=working) is Fresh.SKIP:
+        git = gitops.is_git_repo(path)
+        if sr.plan_freshness(git=git, working_sessions=working) is Fresh.SKIP:
+            if not git:
+                sr.on_pull(gitops.NOT_A_REPO, now)  # so status reads "not-a-repo", not "-"
             return
         outcome = gitops.pull(path)
         decision = sr.on_pull(outcome, now)
