@@ -88,6 +88,17 @@ class Config(BaseModel):
         return self.overrides.get(repo, self.defaults)
 
 
+def repo_path(raw: str | Path) -> Path:
+    """The canonical key for a managed directory.
+
+    The registry, the override tables, and `root` are all keyed by directory
+    identity, so all three have to spell a path the same way. `resolve()`
+    collapses a symlink and its target to one key, and is non-strict, so a path
+    that does not exist yet still normalizes.
+    """
+    return Path(raw).expanduser().resolve()
+
+
 def config_dir() -> Path:
     if env := os.environ.get("GROUNDCREW_CONFIG_DIR"):
         return Path(env)
@@ -255,10 +266,10 @@ def load() -> Config:
             }.items()
             if v is not None
         }
-        overrides[Path(raw_key).expanduser()] = defaults.model_copy(update=table_updates)
+        overrides[repo_path(raw_key)] = defaults.model_copy(update=table_updates)
 
     env_root = os.environ.get("GROUNDCREW_ROOT")
-    root = Path(env_root or file.root or str(Path.home() / "Projects")).expanduser()
+    root = repo_path(env_root or file.root or str(Path.home() / "Projects"))
 
     return Config(
         root=root,
