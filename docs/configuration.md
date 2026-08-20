@@ -32,6 +32,12 @@ root) — with per-repo overrides in `[repos."<path>"]` tables (any
 `[claude]` key except `bin`, plus `post_pull`). Changing them takes effect through drift: restart the
 daemon and each affected supervisor converges once its sessions are quiet.
 
+A registered directory need not be a git repository. Scratch directories work
+under `spawn = "same-dir"`; `groundcrew add` refuses one under `spawn =
+"worktree"`, which needs a repository to create worktrees in, and the daemon
+holds the same line if the config changes later. Freshness pulls report
+`not-a-repo` and do nothing.
+
 `create_session_in_dir` also decides whether a supervisor restart keeps its
 cloud environment, since the replacement reconnects through the in-dir session.
 Setting it to `false` keeps every session in an isolated worktree and leaves the

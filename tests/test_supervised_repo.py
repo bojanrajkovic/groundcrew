@@ -49,30 +49,64 @@ def supervisor(settings: RepoSettings | None = None, version: str | None = "1.0.
 def test_missing_directory_warns_and_waits() -> None:
     repo = entity()
 
-    assert repo.plan_supervision(NOW, present=False, trusted=True, alive=False) is Plan.WAIT
+    assert (
+        repo.plan_supervision(NOW, present=False, trusted=True, git=True, alive=False) is Plan.WAIT
+    )
     assert WarningKind.MISSING in repo.warnings
 
 
 def test_untrusted_repo_warns_and_waits() -> None:
     repo = entity()
 
-    assert repo.plan_supervision(NOW, present=True, trusted=False, alive=False) is Plan.WAIT
+    assert (
+        repo.plan_supervision(NOW, present=True, trusted=False, git=True, alive=False) is Plan.WAIT
+    )
     assert WarningKind.UNTRUSTED in repo.warnings
 
 
 def test_trust_and_missing_warnings_clear_once_condition_lifts() -> None:
     repo = entity()
-    repo.plan_supervision(NOW, present=True, trusted=False, alive=False)
+    repo.plan_supervision(NOW, present=True, trusted=False, git=True, alive=False)
 
-    assert repo.plan_supervision(NOW, present=True, trusted=True, alive=False) is Plan.SPAWN
+    assert (
+        repo.plan_supervision(NOW, present=True, trusted=True, git=True, alive=False) is Plan.SPAWN
+    )
     assert WarningKind.UNTRUSTED not in repo.warnings
+
+
+def test_worktree_spawn_needs_a_git_repository() -> None:
+    repo = entity()  # spawn="worktree"
+
+    assert (
+        repo.plan_supervision(NOW, present=True, trusted=True, git=False, alive=False) is Plan.WAIT
+    )
+    assert "same-dir" in repo.warnings[WarningKind.NO_GIT]
+
+
+def test_same_dir_spawn_needs_no_git_repository() -> None:
+    repo = entity(RepoSettings(spawn="same-dir"))
+
+    assert (
+        repo.plan_supervision(NOW, present=True, trusted=True, git=False, alive=False) is Plan.SPAWN
+    )
+    assert WarningKind.NO_GIT not in repo.warnings
+
+
+def test_no_git_warning_clears_once_the_directory_becomes_a_repo() -> None:
+    repo = entity()
+    repo.plan_supervision(NOW, present=True, trusted=True, git=False, alive=False)
+
+    assert (
+        repo.plan_supervision(NOW, present=True, trusted=True, git=True, alive=False) is Plan.SPAWN
+    )
+    assert WarningKind.NO_GIT not in repo.warnings
 
 
 def test_live_supervisor_means_wait() -> None:
     repo = entity()
     repo.supervisor = supervisor()
 
-    assert repo.plan_supervision(NOW, present=True, trusted=True, alive=True) is Plan.WAIT
+    assert repo.plan_supervision(NOW, present=True, trusted=True, git=True, alive=True) is Plan.WAIT
     assert repo.supervisor is not None
 
 
@@ -80,7 +114,7 @@ def test_dead_supervisor_is_released_and_respawned_same_pass() -> None:
     repo = entity()
     repo.supervisor = supervisor()
 
-    decision = repo.plan_supervision(NOW, present=True, trusted=True, alive=False)
+    decision = repo.plan_supervision(NOW, present=True, trusted=True, git=True, alive=False)
 
     assert decision is Plan.SPAWN
     assert repo.supervisor is None
@@ -90,17 +124,26 @@ def test_third_crash_in_window_trips_breaker_with_alert() -> None:
     repo = entity()
     for i in range(2):
         repo.supervisor = supervisor()
-        assert repo.plan_supervision(NOW + i, present=True, trusted=True, alive=False) is Plan.SPAWN
+        assert (
+            repo.plan_supervision(NOW + i, present=True, trusted=True, git=True, alive=False)
+            is Plan.SPAWN
+        )
     repo.supervisor = supervisor()
 
-    decision = repo.plan_supervision(NOW + 2, present=True, trusted=True, alive=False)
+    decision = repo.plan_supervision(NOW + 2, present=True, trusted=True, git=True, alive=False)
 
     assert isinstance(decision, Alert)
     assert "crash-looping" in decision.message
     # in backoff: no spawn until the window passes
-    assert repo.plan_supervision(NOW + 3, present=True, trusted=True, alive=False) is Plan.WAIT
+    assert (
+        repo.plan_supervision(NOW + 3, present=True, trusted=True, git=True, alive=False)
+        is Plan.WAIT
+    )
     after = NOW + 2 + BACKOFF_SECONDS + 1
-    assert repo.plan_supervision(after, present=True, trusted=True, alive=False) is Plan.SPAWN
+    assert (
+        repo.plan_supervision(after, present=True, trusted=True, git=True, alive=False)
+        is Plan.SPAWN
+    )
 
 
 # ── retirement ──────────────────────────────────────────────────────────────
@@ -179,16 +222,16 @@ def test_stuck_retirement_alerts_once() -> None:
 
 
 def test_sessions_confined_to_worktrees_never_block_a_pull() -> None:
-    assert entity().plan_freshness(working_sessions=0) is Fresh.PULL
+    assert entity().plan_freshness(git=True, working_sessions=0) is Fresh.PULL
 
 
 def test_pull_defers_while_a_session_works_in_the_main_checkout() -> None:
     repo = entity(RepoSettings(spawn="same-dir"))
 
-    assert repo.plan_freshness(working_sessions=2) is Fresh.SKIP
+    assert repo.plan_freshness(git=True, working_sessions=2) is Fresh.SKIP
     assert "2 session(s) working" in repo.warnings[WarningKind.DEFERRED]
     # sessions idle or gone → pull again, deferral warning cleared
-    assert repo.plan_freshness(working_sessions=0) is Fresh.PULL
+    assert repo.plan_freshness(git=True, working_sessions=0) is Fresh.PULL
     assert WarningKind.DEFERRED not in repo.warnings
 
 
@@ -200,7 +243,7 @@ def test_a_working_in_dir_session_blocks_a_pull_in_a_worktree_repo() -> None:
     """
     repo = entity()  # spawn="worktree", create_session_in_dir on
 
-    assert repo.plan_freshness(working_sessions=1) is Fresh.SKIP
+    assert repo.plan_freshness(git=True, working_sessions=1) is Fresh.SKIP
 
 
 def pull_outcome(
@@ -274,7 +317,10 @@ def test_successful_pull_resets_failure_tracking() -> None:
     repo.on_pull(pull_outcome(PullKind.FF_PULLED), NOW)
 
     assert repo.pull_failures == 0
-    assert WarningKind.PULL not in repo.warnings or repo.plan_freshness(0) is Fresh.PULL
+    assert (
+        WarningKind.PULL not in repo.warnings
+        or repo.plan_freshness(git=True, working_sessions=0) is Fresh.PULL
+    )
     # a fresh run of failures alerts again
     for _ in range(2):
         assert repo.on_pull(failed, NOW) is None
@@ -551,7 +597,7 @@ def test_freshness_pass_never_erases_the_drift_warning() -> None:
     )
     assert WarningKind.DRIFT in repo.warnings
 
-    repo.plan_freshness(working_sessions=0)
+    repo.plan_freshness(git=True, working_sessions=0)
     repo.on_pull(pull_outcome(PullKind.FF_PULLED), NOW)
 
     assert WarningKind.DRIFT in repo.warnings
@@ -576,3 +622,20 @@ def test_to_state_reflects_supervisor_and_bookkeeping() -> None:
 
     repo.supervisor = None
     assert repo.to_state().pid is None
+
+
+def test_freshness_skips_a_directory_git_does_not_manage() -> None:
+    """No repository to pull from, and no deferral to report: there is no pull to defer."""
+    repo = entity(RepoSettings(spawn="same-dir"))
+
+    assert repo.plan_freshness(git=False, working_sessions=2) is Fresh.SKIP
+    assert WarningKind.DEFERRED not in repo.warnings
+
+
+def test_not_a_repo_pull_neither_warns_nor_counts_as_a_failure() -> None:
+    repo = entity()
+
+    assert repo.on_pull(pull_outcome(PullKind.NOT_A_REPO, "not a git repository"), NOW) is None
+    assert repo.warnings == {}
+    assert repo.pull_failures == 0
+    assert repo.last_pull_kind == "not-a-repo"

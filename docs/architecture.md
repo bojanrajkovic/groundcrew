@@ -88,7 +88,10 @@ another branch → `git fetch origin <default>:<default>` (updates the ref,
 never touches the working tree); on the default branch but dirty → fetch only,
 plus a status warning. Only modified *tracked* files count as dirty. A diverged local
 default branch is classified as `diverged` — a warning for a human, not an
-infrastructure failure, so it never triggers the consecutive-failure alert.
+infrastructure failure, so it never triggers the consecutive-failure alert. A
+registered directory git does not manage reports `not-a-repo` and is never
+pulled; under `spawn = "worktree"` it never gets a supervisor either, since
+remote-control needs a repository to create worktrees in.
 
 The daemon exits without touching its children (`KillMode=process`,
 `start_new_session`); the next daemon instance re-adopts them from the

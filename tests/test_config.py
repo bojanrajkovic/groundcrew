@@ -240,3 +240,28 @@ def test_bad_config_exits_with_ex_config(
 
     assert cli.main() == config.EX_CONFIG
     assert "bogus" in capsys.readouterr().err
+
+
+def test_add_refuses_a_non_git_directory_under_worktree_spawn(
+    sandbox: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scratch = sandbox / "projects" / "scratch"
+    scratch.mkdir()
+
+    assert cli.cmd_add(config.load(), [str(scratch)]) == 1
+    out = capsys.readouterr().out
+    assert f'[repos."{scratch}"]' in out
+    assert 'spawn = "same-dir"' in out
+    assert not config.load_registry()
+
+
+def test_add_accepts_a_non_git_directory_under_same_dir_spawn(
+    sandbox: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scratch = sandbox / "projects" / "scratch"
+    scratch.mkdir()
+    write_config(sandbox, f'[repos."{scratch}"]\nspawn = "same-dir"\n')
+
+    assert cli.cmd_add(config.load(), [str(scratch)]) == 0
+    assert "freshness pulls are skipped" in capsys.readouterr().out
+    assert config.load_registry() == [scratch]

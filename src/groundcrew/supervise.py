@@ -47,7 +47,7 @@ from groundcrew.config import (
     RepoSettings,
     state_dir,
 )
-from groundcrew.gitops import PullKind, PullOutcome
+from groundcrew.gitops import PullKind, PullOutcome, is_git_repo
 
 # Suppresses the in-dir session, which is what a replacement supervisor
 # reconnects to the previous environment through. See docs/restart-safety.md.
@@ -226,7 +226,7 @@ def match_orphans(
         repo = wanted.get(proc.cwd)
         if repo is None:
             candidate = Path(proc.cwd)
-            if candidate.is_relative_to(root) and (candidate / ".git").exists():
+            if candidate.is_relative_to(root) and is_git_repo(candidate):
                 repo = candidate
         if repo is None or repo in adopted:
             continue
@@ -328,6 +328,7 @@ class WarningKind(enum.Enum):
     DRIFT = "drift"  # plan_drift
     UNTRUSTED = "untrusted"  # plan_supervision
     MISSING = "missing"
+    NO_GIT = "no_git"
 
 
 class RepoState(BaseModel):
@@ -430,11 +431,12 @@ class SupervisedRepo:
     # -- supervision ------------------------------------------------------
 
     def plan_supervision(
-        self, now: float, *, present: bool, trusted: bool, alive: bool
+        self, now: float, *, present: bool, trusted: bool, git: bool, alive: bool
     ) -> Plan | Alert:
         """Should the shell spawn a supervisor here? Alert = crash breaker tripped."""
         self.warnings.pop(WarningKind.UNTRUSTED, None)
         self.warnings.pop(WarningKind.MISSING, None)
+        self.warnings.pop(WarningKind.NO_GIT, None)
         if not present:
             self.warnings[WarningKind.MISSING] = "missing: directory does not exist"
             return Plan.WAIT
@@ -449,9 +451,23 @@ class SupervisedRepo:
                 )
         if self.crashes.in_backoff(now):
             return Plan.WAIT
+        return self._spawn_gate(trusted=trusted, git=git)
+
+    def _spawn_gate(self, *, trusted: bool, git: bool) -> Plan:
+        """What has to hold about the directory itself before a supervisor starts.
+
+        Checked here rather than alongside `present`, so that a repo losing its
+        trust entry or its `.git` under a live supervisor still books that
+        supervisor's death as a crash instead of swallowing it.
+        """
         if not trusted:
             self.warnings[WarningKind.UNTRUSTED] = (
                 "untrusted: run `groundcrew add` to seed workspace trust"
+            )
+            return Plan.WAIT
+        if not git and self.settings.spawn == "worktree":
+            self.warnings[WarningKind.NO_GIT] = (
+                'no git: worktree spawns need a repository; set spawn = "same-dir"'
             )
             return Plan.WAIT
         return Plan.SPAWN
@@ -475,16 +491,17 @@ class SupervisedRepo:
 
     # -- freshness --------------------------------------------------------
 
-    def plan_freshness(self, working_sessions: int) -> Fresh:
-        """May the shell pull? A pull rewrites the main checkout.
+    def plan_freshness(self, *, git: bool, working_sessions: int) -> Fresh:
+        """May the shell pull? Two things stop one.
 
-        What blocks it is a session *working* in that checkout. `spawn` only
-        approximates that: same-dir puts every session there, and worktree mode
-        still leaves the in-dir session there. Presence alone overshoots in the
-        other direction, since `create_session_in_dir` parks an idle anchor
-        session in the root and never takes it away. The shell counts root
-        sessions that are not quiet, so neither a launch setting nor an idle
-        anchor is re-derived here.
+        Without a git repository there is nothing to pull, and nothing to warn
+        about either. Otherwise what blocks a pull is a session *working* in the
+        checkout a pull rewrites. `spawn` only approximates that: same-dir puts
+        every session there, and worktree mode still leaves the in-dir session
+        there. Presence alone overshoots in the other direction, since
+        `create_session_in_dir` parks an idle anchor session in the root and
+        never takes it away. The shell counts root sessions that are not quiet,
+        so neither a launch setting nor an idle anchor is re-derived here.
         """
         for kind in (
             WarningKind.PARKED,
@@ -495,6 +512,8 @@ class SupervisedRepo:
             WarningKind.DEFERRED,
         ):
             self.warnings.pop(kind, None)
+        if not git:
+            return Fresh.SKIP
         if working_sessions:
             self.warnings[WarningKind.DEFERRED] = (
                 f"deferred: pull skipped, {working_sessions} session(s) working in the tree"

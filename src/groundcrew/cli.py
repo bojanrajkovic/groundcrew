@@ -25,16 +25,32 @@ from groundcrew.daemon import FleetState, run_daemon
 from groundcrew.supervise import RepoState
 
 
-def cmd_add(paths: list[str]) -> int:
+def _needs_same_dir(repo: Path) -> str:
+    """The refusal, carrying the resolved path the override has to be keyed by."""
+    return (
+        f'refused {repo}: not a git repository, and spawn is "worktree", which needs one.\n'
+        f"add this to config.toml, then retry:\n\n"
+        f'    [repos."{repo}"]\n'
+        f'    spawn = "same-dir"\n'
+    )
+
+
+def cmd_add(cfg: Config, paths: list[str]) -> int:
     registry = load_registry()
     to_add: list[Path] = []
     for raw in paths:
         repo = repo_path(raw)
-        if not (repo / ".git").exists():
-            print(f"skip {repo}: not a git repository")
+        if not repo.is_dir():
+            print(f"skip {repo}: not a directory")
             continue
-        if not gitops.has_remote(repo):
-            print(f"note {repo}: no git remote; pulls will be skipped")
+        if gitops.is_git_repo(repo):
+            if not gitops.has_remote(repo):
+                print(f"note {repo}: no git remote; pulls will be skipped")
+        elif cfg.for_repo(repo).spawn == "worktree":
+            print(_needs_same_dir(repo))
+            continue
+        else:
+            print(f"note {repo}: not a git repository; freshness pulls are skipped")
         to_add.append(repo)
     if not to_add:
         return 1
@@ -196,7 +212,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("daemon", help="run the supervision daemon (systemd entry point)")
     sub.add_parser("status", help="show fleet state")
-    p_add = sub.add_parser("add", help="trust + register repositories")
+    p_add = sub.add_parser("add", help="trust + register directories")
     p_add.add_argument("paths", nargs="+")
     p_remove = sub.add_parser("remove", help="unregister repositories")
     p_remove.add_argument("paths", nargs="+")
@@ -222,7 +238,7 @@ def main() -> int:
     # argparse refuses anything not registered above, so a missing key is a bug.
     commands: dict[str, Callable[[], int]] = {
         "status": lambda: cmd_status(cfg),
-        "add": lambda: cmd_add(args.paths),
+        "add": lambda: cmd_add(cfg, args.paths),
         "remove": lambda: cmd_remove(args.paths),
         "clean": lambda: cmd_clean(args.repo),
         "logs": lambda: cmd_logs(args.repo, args.lines, verbatim=args.raw),
