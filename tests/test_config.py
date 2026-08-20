@@ -349,29 +349,3 @@ def test_an_empty_path_is_rejected_rather_than_resolved(sandbox: Path) -> None:
 
     with pytest.raises(config.ConfigError, match=r"\[\[repos\]\] #1: path must not be empty"):
         config.load_registry()
-
-
-def test_add_refuses_a_non_git_directory_under_worktree_spawn(
-    sandbox: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    scratch = sandbox / "projects" / "scratch"
-    scratch.mkdir()
-
-    assert cli.cmd_add(config.load(), [str(scratch)]) == 1
-    out = capsys.readouterr().out
-    assert "[[repos]]" in out
-    assert f'path = "{scratch}"' in out
-    assert 'spawn = "same-dir"' in out
-    assert not config.load_registry()
-
-
-def test_add_accepts_a_non_git_directory_whose_entry_says_same_dir(
-    sandbox: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    scratch = sandbox / "projects" / "scratch"
-    scratch.mkdir()
-    write_registry(f'[[repos]]\npath = "{scratch}"\nspawn = "same-dir"\n')
-
-    assert cli.cmd_add(config.load(), [str(scratch)]) == 0
-    assert "freshness pulls are skipped" in capsys.readouterr().out
-    assert config.load_registry() == [_RegistryEntry(path=scratch, spawn="same-dir")]

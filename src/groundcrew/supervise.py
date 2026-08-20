@@ -467,7 +467,8 @@ class SupervisedRepo:
             return Plan.WAIT
         if not git and self.settings.spawn == "worktree":
             self.warnings[WarningKind.NO_GIT] = (
-                'no git: worktree spawns need a repository; set spawn = "same-dir"'
+                "no git: worktree spawns need a repository; "
+                "run `groundcrew add --spawn same-dir` on it"
             )
             return Plan.WAIT
         return Plan.SPAWN
