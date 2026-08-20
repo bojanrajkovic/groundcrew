@@ -42,7 +42,9 @@ from groundcrew.config import (
     POLL_SECONDS,
     UPDATE_TIMEOUT,
     Config,
+    _RegistryEntry,
     atomic_write,
+    effective,
     load_registry,
     state_dir,
 )
@@ -156,10 +158,17 @@ class Daemon:
         self.last_update_result = ""
         self.unregistered: list[str] = []
 
-    def repo(self, path: Path) -> SupervisedRepo:
-        if path not in self.fleet:
-            self.fleet[path] = SupervisedRepo(path=path, settings=self.cfg.for_repo(path))
-        return self.fleet[path]
+    def repo(self, entry: _RegistryEntry) -> SupervisedRepo:
+        """The entity for this directory, created the first time it is seen.
+
+        Settings are read once, at creation: per-directory settings are
+        restart-only, exactly like the globals. A daemon restart is free.
+        """
+        if entry.path not in self.fleet:
+            self.fleet[entry.path] = SupervisedRepo(
+                path=entry.path, settings=effective(self.cfg.defaults, entry)
+            )
+        return self.fleet[entry.path]
 
     def alert(self, a: Alert) -> None:
         notify(self.cfg.notify_command, a.title, a.message)
@@ -170,8 +179,11 @@ class Daemon:
         signal.signal(signal.SIGTERM, self._on_signal)
         signal.signal(signal.SIGINT, self._on_signal)
         registry = load_registry()
-        for path, sup in supervise.find_orphans(self.cfg.root, registry).items():
-            self.repo(path).supervisor = sup
+        entries = {e.path: e for e in registry}
+        for path, sup in supervise.find_orphans(self.cfg.root, list(entries)).items():
+            # An adopted supervisor in a directory nobody registered has no
+            # entry to read; it runs on the globals until it is retired.
+            self.repo(entries.get(path, _RegistryEntry(path=path))).supervisor = sup
             log.info("adopted supervisor pid=%d for %s", sup.pid, path)
         self.binary_version = claude_state.binary_version(self.cfg.claude_bin)
         log.info(
@@ -213,11 +225,12 @@ class Daemon:
 
     # -- supervision -------------------------------------------------------
 
-    def reconcile(self, registry: list[Path], now: float) -> None:
+    def reconcile(self, registry: list[_RegistryEntry], now: float) -> None:
         trusted = claude_state.trusted_paths()
         spawned_this_pass = 0
-        for path in registry:
-            sr = self.repo(path)
+        for entry in registry:
+            path = entry.path
+            sr = self.repo(entry)
             alive = sr.supervisor is not None and sr.supervisor.alive()
             if sr.supervisor is not None and not alive:
                 log.warning("supervisor for %s died (pid=%d)", path, sr.supervisor.pid)
@@ -245,7 +258,7 @@ class Daemon:
                 continue
             spawned_this_pass += 1
             log.info("spawned supervisor pid=%d for %s", sr.supervisor.pid, path)
-        self.retire_unregistered(registry, now)
+        self.retire_unregistered([e.path for e in registry], now)
 
     def retire_unregistered(self, registry: list[Path], now: float) -> None:
         # Entities are kept (supervisor=None) rather than deleted so a repo that
@@ -271,11 +284,12 @@ class Daemon:
 
     # -- hourly tick -------------------------------------------------------
 
-    def tick(self, registry: list[Path], now: float) -> None:
+    def tick(self, registry: list[_RegistryEntry], now: float) -> None:
         self.refresh_binary_version()
         sessions = claude_state.live_sessions()
-        for path in registry:
-            sr = self.repo(path)
+        for entry in registry:
+            path = entry.path
+            sr = self.repo(entry)
             if not path.is_dir():
                 continue
             try:
@@ -289,7 +303,8 @@ class Daemon:
         self.check_rollout_complete()
         # Discovery is a filesystem sweep; hourly freshness is plenty for a
         # status hint, so it lives here rather than on every 30 s state write.
-        self.unregistered = [str(p) for p in discover_unregistered(registry, self.cfg.root)]
+        paths = [e.path for e in registry]
+        self.unregistered = [str(p) for p in discover_unregistered(paths, self.cfg.root)]
 
     def refresh_binary_version(self) -> None:
         version = claude_state.binary_version(self.cfg.claude_bin)
@@ -420,19 +435,20 @@ class Daemon:
 
     # -- state snapshot ----------------------------------------------------
 
-    def write_state(self, registry: list[Path]) -> None:
+    def write_state(self, registry: list[_RegistryEntry]) -> None:
+        registered = [e.path for e in registry]
         repos = {
             str(path): sr.to_state()
             for path, sr in self.fleet.items()
             # fully retired entities keep their crash history but leave status
-            if path in registry or sr.supervisor is not None
+            if path in registered or sr.supervisor is not None
         }
         state = FleetState(
             updated_at=time.time(),
             binary_version=self.binary_version,
             pending_rollout=self.pending_rollout,
             last_update_result=self.last_update_result,
-            registered=[str(r) for r in registry],
+            registered=[str(r) for r in registered],
             unregistered=self.unregistered,
             repos=repos,
         )

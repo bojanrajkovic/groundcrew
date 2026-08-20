@@ -113,6 +113,16 @@ Honest caveats:
   record fields, lines there carry their own timestamp and level, where the
   journald format leaves both to the journal.
 
+## Upgrading to settings in the registry
+
+Per-repo settings moved from `config.toml` into `repos.toml`. The first run
+after the upgrade moves any `[repos."<path>"]` tables into their registry
+entries, drops them from `config.toml`, and leaves the original as
+`config.toml.bak`. The move reports what it did, including any table naming an
+unregistered directory — those are dropped. A few table shapes abort the
+migration instead, and the daemon exits 78. See
+[Migrating settings out of `config.toml`](configuration.md#migrating-settings-out-of-configtoml).
+
 ## Upgrading from a pre-config version
 
 The registry moved out of the groundcrew checkout, and Pushover/mise

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from groundcrew.config import claude_home
+from groundcrew.config import _RegistryEntry, claude_home, registry_path
 
 
 @pytest.fixture
@@ -69,6 +69,16 @@ def write_config(sandbox: Path, body: str) -> None:
     cfg_dir = sandbox / "config"
     cfg_dir.mkdir(exist_ok=True)
     (cfg_dir / "config.toml").write_text(body)
+
+
+def entry(path: Path) -> _RegistryEntry:
+    """A registry entry for a directory that sets nothing of its own."""
+    return _RegistryEntry(path=path)
+
+
+def write_registry(body: str) -> None:
+    """Hand-write repos.toml, the way an older groundcrew or a human would."""
+    registry_path().write_text(body)
 
 
 def write_session(

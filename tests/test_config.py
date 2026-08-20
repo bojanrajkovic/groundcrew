@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
-from conftest import write_config
+from conftest import write_config, write_registry
 
 from groundcrew import cli, config
+from groundcrew.config import RepoSettings, _RegistryEntry
 
 
 def test_no_file_means_current_behavior(sandbox: Path) -> None:
@@ -18,11 +18,10 @@ def test_no_file_means_current_behavior(sandbox: Path) -> None:
     assert cfg.nightly_hour == 4
     assert cfg.post_pull_timeout == 600
     assert cfg.notify_command == ()
-    assert cfg.defaults == config.RepoSettings()
-    assert cfg.overrides == {}
+    assert cfg.defaults == RepoSettings()
 
 
-def test_full_file_parses_and_materializes_overrides(sandbox: Path) -> None:
+def test_full_file_parses(sandbox: Path) -> None:
     write_config(
         sandbox,
         """
@@ -43,10 +42,6 @@ def test_full_file_parses_and_materializes_overrides(sandbox: Path) -> None:
         quiet_seconds = 60
         tick_seconds = 600
         nightly_hour = 2
-
-        [repos."/somewhere/cautious"]
-        permission_mode = "plan"
-        post_pull = []
         """,
     )
 
@@ -61,15 +56,6 @@ def test_full_file_parses_and_materializes_overrides(sandbox: Path) -> None:
     assert cfg.defaults.capacity == 8
     assert cfg.defaults.create_session_in_dir is False
     assert cfg.defaults.post_pull == ("mise", "install")
-    # the override is a complete RepoSettings: unset keys inherit the defaults
-    override = cfg.for_repo(Path("/somewhere/cautious"))
-    assert override.permission_mode == "plan"
-    assert override.post_pull == ()
-    assert override.spawn == "same-dir"
-    assert override.capacity == 8
-    assert override.create_session_in_dir is False
-    # unknown repos get the defaults object itself
-    assert cfg.for_repo(Path("/somewhere/else")) is cfg.defaults
 
 
 def test_claude_bin_key_feeds_the_config(sandbox: Path) -> None:
@@ -101,9 +87,6 @@ def test_tilde_expansion(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
         [hooks]
         post_pull = ["~/bin/refresh", "--all"]
-
-        [repos."~/stuff/repo"]
-        capacity = 1
         """,
     )
 
@@ -111,7 +94,6 @@ def test_tilde_expansion(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
     assert cfg.root == sandbox / "stuff"
     assert cfg.defaults.post_pull == (str(sandbox / "bin" / "refresh"), "--all")
-    assert cfg.for_repo(sandbox / "stuff" / "repo").capacity == 1
 
 
 def test_unknown_top_level_key_names_it(sandbox: Path) -> None:
@@ -125,20 +107,6 @@ def test_unknown_nested_key_names_the_path(sandbox: Path) -> None:
     write_config(sandbox, "[claude]\ncapactiy = 32\n")
 
     with pytest.raises(config.ConfigError, match=r"\[claude\].capactiy"):
-        config.load()
-
-
-def test_unknown_override_key_names_the_path(sandbox: Path) -> None:
-    write_config(sandbox, '[repos."/x"]\nname_prefix = "nope"\n')
-
-    with pytest.raises(config.ConfigError, match="name_prefix"):
-        config.load()
-
-
-def test_global_only_keys_rejected_per_repo(sandbox: Path) -> None:
-    write_config(sandbox, '[repos."/x"]\nbin = "/somewhere/claude"\n')
-
-    with pytest.raises(config.ConfigError, match="bin"):
         config.load()
 
 
@@ -184,21 +152,125 @@ def test_invalid_toml_is_a_config_error(sandbox: Path) -> None:
         config.load()
 
 
-def test_registry_defaults_into_config_dir(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("GROUNDCREW_REGISTRY")
-
-    assert config.registry_path() == sandbox / "config" / "repos.toml"
+# ── repos.toml: one entry per managed directory ─────────────────────────────
 
 
-def test_override_key_resolves_like_a_registry_path(sandbox: Path) -> None:
-    """`add` registers the resolved path, so an override keyed by a symlink must find it."""
+def test_entry_settings_round_trip_and_unset_ones_stay_unset(sandbox: Path) -> None:
+    """`remove` rewrites every survivor, so an untouched entry must come back untouched."""
+    plain = sandbox / "projects" / "plain"
+    tuned = sandbox / "projects" / "tuned"
+
+    config.save_registry(
+        [
+            _RegistryEntry(path=tuned, spawn="same-dir", create_session_in_dir=False),
+            _RegistryEntry(path=plain),
+        ]
+    )
+
+    text = config.registry_path().read_text()
+    assert f'[[repos]]\npath = "{plain}"\n' in text
+    assert (
+        f'[[repos]]\npath = "{tuned}"\nspawn = "same-dir"\ncreate_session_in_dir = false\n' in text
+    )
+    assert "capacity" not in text  # defaults are never stamped into the file
+    assert config.load_registry() == [
+        _RegistryEntry(path=plain),
+        _RegistryEntry(path=tuned, spawn="same-dir", create_session_in_dir=False),
+    ]
+
+
+def test_legacy_flat_list_still_loads(sandbox: Path) -> None:
+    a, b = sandbox / "projects" / "a", sandbox / "projects" / "b"
+    write_registry(f'repos = ["{a}", "{b}"]\n')
+
+    assert config.load_registry() == [_RegistryEntry(path=a), _RegistryEntry(path=b)]
+
+
+def test_saving_a_legacy_registry_upgrades_it(sandbox: Path) -> None:
+    a, b = sandbox / "projects" / "a", sandbox / "projects" / "b"
+    write_registry(f'repos = ["{b}", "{a}"]\n')
+
+    config.save_registry(config.load_registry())
+
+    text = config.registry_path().read_text()
+    assert "repos = [" not in text
+    assert text.count("[[repos]]") == 2
+    assert config.load_registry() == [_RegistryEntry(path=a), _RegistryEntry(path=b)]
+
+
+def test_entry_path_resolves_like_a_registry_path(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`add` registers the resolved path, so a hand-written entry has to match it."""
+    monkeypatch.setenv("HOME", str(sandbox))
     target = sandbox / "projects" / "scratch"
     target.mkdir()
     link = sandbox / "link-to-scratch"
     link.symlink_to(target)
-    write_config(sandbox, f'[repos."{link}"]\nspawn = "same-dir"\n')
+    write_registry(f'[[repos]]\npath = "{link}"\n\n[[repos]]\npath = "~/projects/other"\n')
 
-    assert config.load().for_repo(target).spawn == "same-dir"
+    assert [e.path for e in config.load_registry()] == [target, sandbox / "projects" / "other"]
+
+
+def test_unknown_key_in_an_entry_names_the_file_and_the_entry(sandbox: Path) -> None:
+    write_registry('[[repos]]\npath = "/a"\n\n[[repos]]\npath = "/b"\nname_prefix = "nope"\n')
+
+    with pytest.raises(config.ConfigError) as raised:
+        config.load_registry()
+
+    message = str(raised.value)
+    assert "repos.toml" in message
+    assert "[[repos]] #2: name_prefix is not a known key" in message
+    # the legacy string arm of the union always fails too; that is not the user's problem
+    assert "valid string" not in message
+
+
+def test_global_only_keys_rejected_in_an_entry(sandbox: Path) -> None:
+    write_registry('[[repos]]\npath = "/a"\nbin = "/somewhere/claude"\n')
+
+    with pytest.raises(config.ConfigError, match="bin"):
+        config.load_registry()
+
+
+def test_session_spawn_mode_rejected_in_an_entry(sandbox: Path) -> None:
+    write_registry('[[repos]]\npath = "/a"\nspawn = "session"\n')
+
+    with pytest.raises(config.ConfigError, match="session"):
+        config.load_registry()
+
+
+def test_entry_without_a_path_says_so(sandbox: Path) -> None:
+    write_registry('[[repos]]\nspawn = "same-dir"\n')
+
+    with pytest.raises(config.ConfigError, match=r"\[\[repos\]\] #1: path"):
+        config.load_registry()
+
+
+def test_effective_layers_entry_settings_over_defaults(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(sandbox))
+    defaults = RepoSettings(spawn="same-dir", capacity=8, post_pull=("mise", "install"))
+    entry = _RegistryEntry(
+        path=sandbox / "projects" / "x", permission_mode="plan", post_pull=["~/bin/refresh"]
+    )
+
+    settings = config.effective(defaults, entry)
+
+    assert settings.permission_mode == "plan"
+    assert settings.post_pull == (str(sandbox / "bin" / "refresh"),)
+    assert settings.spawn == "same-dir"  # untouched fields keep the global value
+    assert settings.capacity == 8
+    # an entry that sets nothing is exactly the defaults; an empty list still overrides
+    bare = _RegistryEntry(path=Path("/x"))
+    assert config.effective(defaults, bare) == defaults
+    assert config.effective(defaults, _RegistryEntry(path=Path("/x"), post_pull=[])).post_pull == ()
+
+
+def test_registry_defaults_into_config_dir(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GROUNDCREW_REGISTRY")
+
+    assert config.registry_path() == sandbox / "config" / "repos.toml"
 
 
 def test_root_resolves_like_a_registry_path(sandbox: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,26 +284,6 @@ def test_root_resolves_like_a_registry_path(sandbox: Path, monkeypatch: pytest.M
     assert config.load().root == real
 
 
-def test_status_warns_on_override_for_unregistered_repo(
-    sandbox: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    write_config(sandbox, '[repos."/never/registered"]\ncapacity = 1\n')
-    state: dict[str, object] = {
-        "updated_at": 0,
-        "binary_version": None,
-        "pending_rollout": None,
-        "last_update_result": "",
-        "registered": [],
-        "unregistered": [],
-        "repos": {},
-    }
-    (sandbox / "state").mkdir(exist_ok=True)
-    (sandbox / "state" / "state.json").write_text(json.dumps(state))
-
-    assert cli.cmd_status(config.load()) == 0
-    assert "override for unregistered repo: /never/registered" in capsys.readouterr().out
-
-
 def test_bad_config_exits_with_ex_config(
     sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -242,6 +294,63 @@ def test_bad_config_exits_with_ex_config(
     assert "bogus" in capsys.readouterr().err
 
 
+def test_a_broken_registry_reaches_the_user_as_a_message(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """repos.toml is read inside the commands, not by `load`; the message still has to land."""
+    write_registry('[[repos]]\npath = "/a"\nbogus = 1\n')
+    monkeypatch.setattr("sys.argv", ["groundcrew", "remove", "/a"])
+
+    assert cli.main() == config.EX_CONFIG
+    assert "repos.toml: [[repos]] #1: bogus is not a known key" in capsys.readouterr().err
+
+
+# ── repos.toml: what a hand-written or hostile file may hold ────────────────
+
+
+def test_registry_round_trips_what_a_path_is_allowed_to_contain(sandbox: Path) -> None:
+    """A path is bytes, not ASCII.
+
+    `save_registry` rewrites the whole file, so a single path it cannot spell
+    takes every other entry down with it on the next read.
+    """
+    weird = [
+        sandbox / "projects" / "rocket-🚀",
+        sandbox / "projects" / 'quote"and\\backslash',
+        sandbox / "projects" / "tab\tand\nnewline",
+        sandbox / "projects" / "bell\x07",
+    ]
+    entries = [_RegistryEntry(path=p, post_pull=["say", "🚀 done"]) for p in weird]
+
+    config.save_registry(entries)
+
+    assert config.load_registry() == sorted(entries, key=lambda e: e.path)
+
+
+def test_an_unparseable_registry_is_a_config_error(sandbox: Path) -> None:
+    """The daemon reads it before its loop, outside the guard that keeps it up."""
+    write_registry('[[repos]\npath = "/a"\n')
+
+    with pytest.raises(config.ConfigError, match=r"repos\.toml"):
+        config.load_registry()
+
+
+@pytest.mark.parametrize("value", ["42", "true", "1.5", '["/a"]', "{ capacity = 1 }", "1979-05-27"])
+def test_a_path_that_is_not_a_string_names_the_entry(sandbox: Path, value: str) -> None:
+    write_registry(f"[[repos]]\npath = {value}\n")
+
+    with pytest.raises(config.ConfigError, match=r"\[\[repos\]\] #1: path must be a string"):
+        config.load_registry()
+
+
+def test_an_empty_path_is_rejected_rather_than_resolved(sandbox: Path) -> None:
+    """It would otherwise resolve to wherever the daemon happens to be running."""
+    write_registry('[[repos]]\npath = ""\n')
+
+    with pytest.raises(config.ConfigError, match=r"\[\[repos\]\] #1: path must not be empty"):
+        config.load_registry()
+
+
 def test_add_refuses_a_non_git_directory_under_worktree_spawn(
     sandbox: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -250,18 +359,19 @@ def test_add_refuses_a_non_git_directory_under_worktree_spawn(
 
     assert cli.cmd_add(config.load(), [str(scratch)]) == 1
     out = capsys.readouterr().out
-    assert f'[repos."{scratch}"]' in out
+    assert "[[repos]]" in out
+    assert f'path = "{scratch}"' in out
     assert 'spawn = "same-dir"' in out
     assert not config.load_registry()
 
 
-def test_add_accepts_a_non_git_directory_under_same_dir_spawn(
+def test_add_accepts_a_non_git_directory_whose_entry_says_same_dir(
     sandbox: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     scratch = sandbox / "projects" / "scratch"
     scratch.mkdir()
-    write_config(sandbox, f'[repos."{scratch}"]\nspawn = "same-dir"\n')
+    write_registry(f'[[repos]]\npath = "{scratch}"\nspawn = "same-dir"\n')
 
     assert cli.cmd_add(config.load(), [str(scratch)]) == 0
     assert "freshness pulls are skipped" in capsys.readouterr().out
-    assert config.load_registry() == [scratch]
+    assert config.load_registry() == [_RegistryEntry(path=scratch, spawn="same-dir")]

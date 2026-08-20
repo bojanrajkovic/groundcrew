@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -12,6 +13,7 @@ import pytest
 from conftest import (
     add_origin_commit,
     clone,
+    entry,
     git,
     make_repo,
     script,
@@ -20,7 +22,7 @@ from conftest import (
 )
 
 from groundcrew import claude_state, cli, config, supervise
-from groundcrew.config import RepoSettings
+from groundcrew.config import RepoSettings, _RegistryEntry
 from groundcrew.daemon import (
     Daemon,
     JournalPriority,
@@ -84,7 +86,7 @@ def test_freshen_runs_hook_in_repo_after_branch_move(sandbox: Path) -> None:
     write_config(sandbox, f'[hooks]\npost_pull = ["{hook}"]\n')
     daemon = Daemon(config.load())
 
-    daemon.freshen(repo, daemon.repo(repo), time.time())
+    daemon.freshen(repo, daemon.repo(entry(repo)), time.time())
 
     assert marker.read_text().strip() == str(repo)
 
@@ -109,13 +111,13 @@ def test_freshen_skips_the_pull_while_a_session_works_in_the_main_checkout(
             int(time.time() * 1000),
             entrypoint="sdk-cli",
         )
-        daemon.freshen(repo, daemon.repo(repo), time.time())
+        daemon.freshen(repo, daemon.repo(entry(repo)), time.time())
     finally:
         engine.kill()
         engine.wait()
 
     assert git(repo, "rev-parse", "HEAD").stdout.strip() == before
-    assert WarningKind.DEFERRED in daemon.repo(repo).warnings
+    assert WarningKind.DEFERRED in daemon.repo(entry(repo)).warnings
 
 
 def test_freshen_pulls_past_an_idle_in_dir_session(sandbox: Path) -> None:
@@ -142,13 +144,13 @@ def test_freshen_pulls_past_an_idle_in_dir_session(sandbox: Path) -> None:
             int(time.time() * 1000),
             entrypoint="sdk-cli",
         )
-        daemon.freshen(repo, daemon.repo(repo), time.time() + config.QUIET_SECONDS + 60)
+        daemon.freshen(repo, daemon.repo(entry(repo)), time.time() + config.QUIET_SECONDS + 60)
     finally:
         engine.kill()
         engine.wait()
 
     assert git(repo, "rev-parse", "HEAD").stdout.strip() != before
-    assert WarningKind.DEFERRED not in daemon.repo(repo).warnings
+    assert WarningKind.DEFERRED not in daemon.repo(entry(repo)).warnings
 
 
 def test_freshen_hook_failure_reaches_the_real_notifier(sandbox: Path) -> None:
@@ -164,7 +166,7 @@ def test_freshen_hook_failure_reaches_the_real_notifier(sandbox: Path) -> None:
         f'[notify]\ncommand = ["{notifier}"]\n\n[hooks]\npost_pull = ["{hook}"]\n',
     )
     daemon = Daemon(config.load())
-    sr = daemon.repo(repo)
+    sr = daemon.repo(entry(repo))
 
     daemon.freshen(repo, sr, time.time())
 
@@ -185,10 +187,10 @@ def test_reconcile_ramps_spawns_across_passes(sandbox: Path) -> None:
     claude_state.seed_trust(registry)
     daemon = Daemon(config.load())
     try:
-        daemon.reconcile(registry, time.time())
+        daemon.reconcile([entry(r) for r in registry], time.time())
         up_after_first = sum(1 for sr in daemon.fleet.values() if sr.supervisor)
 
-        daemon.reconcile(registry, time.time())
+        daemon.reconcile([entry(r) for r in registry], time.time())
         up_after_second = sum(1 for sr in daemon.fleet.values() if sr.supervisor)
     finally:
         for sr in daemon.fleet.values():
@@ -206,7 +208,7 @@ def test_reconcile_skips_untrusted_repos(sandbox: Path) -> None:
     (sandbox / "claude.json").write_text("{}")
     daemon = Daemon(config.load())
 
-    daemon.reconcile([repo], time.time())
+    daemon.reconcile([entry(repo)], time.time())
 
     sr = daemon.fleet[repo]
     assert sr.supervisor is None
@@ -221,7 +223,7 @@ def test_converge_restarts_a_real_drifted_supervisor(sandbox: Path) -> None:
     repo = sandbox / "projects" / "repo"
     repo.mkdir()
     daemon = Daemon(config.load())
-    sr = daemon.repo(repo)
+    sr = daemon.repo(entry(repo))
     # launched with default args; entity wants capacity 4 → args drift
     sr.settings = RepoSettings(capacity=4)
     sr.supervisor = supervise.spawn(repo, "1.0.0", RepoSettings(), binary=fake_claude)
@@ -246,7 +248,7 @@ def test_converge_spares_a_supervisor_whose_session_waits_on_a_background_task(
     repo = sandbox / "projects" / "repo"
     repo.mkdir()
     daemon = Daemon(config.load())  # create_session_in_dir on: only quiet is in play
-    sr = daemon.repo(repo)
+    sr = daemon.repo(entry(repo))
     sr.supervisor = supervise.spawn(repo, "0.9.0", RepoSettings(), binary=fake_claude)
     handle = sr.supervisor.handle
     assert handle is not None
@@ -286,7 +288,7 @@ def test_converge_spares_a_drifted_supervisor_that_would_lose_its_sessions(
     repo.mkdir()
     settings = RepoSettings(create_session_in_dir=False)
     daemon = Daemon(config.load())
-    sr = daemon.repo(repo)
+    sr = daemon.repo(entry(repo))
     sr.settings = settings
     sr.supervisor = supervise.spawn(repo, "0.9.0", settings, binary=fake_claude)
     handle = sr.supervisor.handle
@@ -319,7 +321,7 @@ def test_state_round_trips_from_daemon_to_status(
     daemon = Daemon(cfg)
     repo = sandbox / "projects" / "repo"
     repo.mkdir()
-    sr = daemon.repo(repo)
+    sr = daemon.repo(entry(repo))
     pid = os.getpid()
     created = claude_state.proc_create_time(pid)
     assert created is not None
@@ -333,7 +335,7 @@ def test_state_round_trips_from_daemon_to_status(
     )
     sr.warnings[WarningKind.PARKED] = "parked: test warning"
 
-    daemon.write_state([repo])
+    daemon.write_state([entry(repo)])
 
     assert cli.cmd_status(cfg) == 0
     out = capsys.readouterr().out
@@ -347,14 +349,14 @@ def test_state_round_trips_from_daemon_to_status(
 
 def test_registry_round_trip(sandbox: Path) -> None:
     repos = [sandbox / "projects" / "b", sandbox / "projects" / "a"]
-    config.save_registry(repos)
+    config.save_registry([entry(r) for r in repos])
 
     loaded = config.load_registry()
 
-    assert loaded == sorted(repos)
+    assert [e.path for e in loaded] == sorted(repos)
     # dedupe on save
-    config.save_registry([*loaded, repos[0]])
-    assert config.load_registry() == sorted(repos)
+    config.save_registry([*loaded, entry(repos[0])])
+    assert [e.path for e in config.load_registry()] == sorted(repos)
 
 
 def test_discover_unregistered_skips_registered_and_nested(sandbox: Path) -> None:
@@ -471,7 +473,62 @@ def test_freshen_records_a_directory_git_does_not_manage(sandbox: Path) -> None:
     scratch.mkdir()
     daemon = Daemon(config.load())
 
-    daemon.freshen(scratch, daemon.repo(scratch), time.time())
+    daemon.freshen(scratch, daemon.repo(entry(scratch)), time.time())
 
-    assert daemon.repo(scratch).last_pull_kind == "not-a-repo"
-    assert daemon.repo(scratch).warnings == {}
+    assert daemon.repo(entry(scratch)).last_pull_kind == "not-a-repo"
+    assert daemon.repo(entry(scratch)).warnings == {}
+
+
+# ── the wiring the feature exists for: entry settings reach the supervisor ──
+
+
+def test_an_entrys_settings_reach_the_supervisor_command_line(sandbox: Path) -> None:
+    """A `[[repos]]` setting is only worth writing if it ends up in the argv."""
+    fake_claude = script(sandbox / "fake-claude", "exec sleep 30")
+    write_config(sandbox, f'[claude]\nbin = "{fake_claude}"\n')
+    repo = make_repo(sandbox / "projects" / "repo")
+    (sandbox / "claude.json").write_text("{}")
+    claude_state.seed_trust([repo])
+    daemon = Daemon(config.load())
+
+    try:
+        daemon.reconcile(
+            [_RegistryEntry(path=repo, capacity=4, permission_mode="plan")], time.time()
+        )
+        sr = daemon.fleet[repo]
+        assert sr.settings.capacity == 4  # not the global 32
+        assert sr.settings.permission_mode == "plan"
+        assert sr.supervisor is not None
+        args = sr.supervisor.launched_args
+        assert args[args.index("--capacity") + 1] == "4"
+        assert args[args.index("--permission-mode") + 1] == "plan"
+    finally:
+        for supervised in daemon.fleet.values():
+            if supervised.supervisor and supervised.supervisor.handle:
+                supervised.supervisor.handle.kill()
+                supervised.supervisor.handle.wait()
+
+
+def test_an_adopted_supervisor_gets_its_registry_entrys_settings(sandbox: Path) -> None:
+    """Adoption looks the path up in the registry; a restart must not lose its settings."""
+    repo = make_repo(sandbox / "projects" / "repo")
+    config.save_registry([_RegistryEntry(path=repo, capacity=4)])
+    daemon = Daemon(config.load())
+    daemon.stop.set()  # run() adopts, then falls straight through the loop
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    # A live process that looks like a supervisor left behind by a previous daemon.
+    engine = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "remote-control"], cwd=repo
+    )
+    try:
+        daemon.run()
+    finally:
+        engine.kill()
+        engine.wait()
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+
+    sr = daemon.fleet[repo]
+    assert sr.supervisor is not None
+    assert sr.supervisor.pid == engine.pid
+    assert sr.settings.capacity == 4  # not the global 32
