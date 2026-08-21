@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import get_args
 
 from pydantic import ValidationError
 
@@ -15,6 +17,8 @@ from groundcrew.config import (
     EX_CONFIG,
     Config,
     ConfigError,
+    PermissionMode,
+    Spawn,
     _RegistryEntry,
     effective,
     load,
@@ -29,45 +33,60 @@ from groundcrew.supervise import RepoState
 
 
 def _needs_same_dir(repo: Path) -> str:
-    """The refusal, spelling the entry that would let this directory in."""
-    return (
-        f'refused {repo}: not a git repository, and spawn is "worktree", which needs one.\n'
-        f"add this to repos.toml, then retry:\n\n"
-        f"    [[repos]]\n"
-        f'    path = "{repo}"\n'
-        f'    spawn = "same-dir"\n'
-    )
+    """The refusal: a chosen spawn mode and the directory contradict each other."""
+    return f'refused {repo}: not a git repository, and spawn = "worktree" needs one.'
 
 
-def cmd_add(cfg: Config, paths: list[str]) -> int:
+def cmd_add(cfg: Config, paths: list[str], settings: dict[str, object]) -> int:
+    """Register directories, creating or updating each one's entry from `settings`.
+
+    Only the settings named are written, so adding a directory that is already
+    registered changes nothing else about it.
+    """
     registry = load_registry()
     known = {entry.path: entry for entry in registry}
-    to_add: list[Path] = []
+    to_add: list[_RegistryEntry] = []
+    inferred: set[Path] = set()
     for raw in paths:
         repo = repo_path(raw)
         if not repo.is_dir():
             print(f"skip {repo}: not a directory")
             continue
-        entry = known.get(repo)
-        settings = effective(cfg.defaults, entry) if entry else cfg.defaults
+        was = known.get(repo, _RegistryEntry(path=repo))
+        # The flags are the boundary, so they get validated as an entry would be.
+        entry = _RegistryEntry.model_validate({**was.model_dump(), **settings})
         if gitops.is_git_repo(repo):
             if not gitops.has_remote(repo):
                 print(f"note {repo}: no git remote; pulls will be skipped")
-        elif settings.spawn == "worktree":
+        elif entry.spawn == "worktree":
+            # Set on this entry, by the flag just passed or by a human editing
+            # the file. Either way somebody chose it, so say no rather than
+            # quietly rewriting the choice.
             print(_needs_same_dir(repo))
             continue
+        elif effective(cfg.defaults, entry).spawn == "worktree":
+            # Only the global default asked for worktree, and it cannot work
+            # here — infer same-dir into the entry, or the next pass repeats it.
+            entry = entry.model_copy(update={"spawn": "same-dir"})
+            inferred.add(repo)
         else:
             print(f"note {repo}: not a git repository; freshness pulls are skipped")
-        to_add.append(repo)
+        to_add.append(entry)
     if not to_add:
         return 1
-    seeded = claude_state.seed_trust(to_add)
-    # Re-adding a registered directory leaves its entry alone; only new ones are written.
-    save_registry(registry + [_RegistryEntry(path=r) for r in to_add if r not in known])
-    for repo in to_add:
+    seeded = claude_state.seed_trust([e.path for e in to_add])
+    # save_registry keys on the path and takes the last write, so these replace
+    # the entries they were built from and append the ones that are new.
+    save_registry(registry + to_add)
+    for entry in to_add:
+        repo = entry.path
+        why = 'not a git repository, so spawn = "same-dir"; ' if repo in inferred else ""
         trust = "trust seeded" if repo in seeded else "already trusted"
-        already = " (already registered)" if repo in known else ""
-        print(f"added {repo} — {trust}{already}")
+        if repo not in known:
+            state = ""
+        else:
+            state = " (settings updated)" if entry != known[repo] else " (already registered)"
+        print(f"added {repo} — {why}{trust}{state}")
     print("the daemon picks these up within 30 seconds")
     return 0
 
@@ -212,13 +231,64 @@ def cmd_logs(raw: str, lines: int, *, verbatim: bool) -> int:
     return 0
 
 
+def _flags(args: argparse.Namespace) -> dict[str, object]:
+    """The per-repo settings the flags actually named; every other one stays unset."""
+    post_pull = [] if args.no_post_pull else args.post_pull
+    return {
+        k: v
+        for k, v in {
+            "spawn": args.spawn,
+            "capacity": args.capacity,
+            "permission_mode": args.permission_mode,
+            "create_session_in_dir": args.create_session_in_dir,
+            "post_pull": post_pull,
+        }.items()
+        if v is not None
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="groundcrew", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("daemon", help="run the supervision daemon (systemd entry point)")
     sub.add_parser("status", help="show fleet state")
-    p_add = sub.add_parser("add", help="trust + register directories")
+    p_add = sub.add_parser(
+        "add", help="trust + register directories, and set their per-directory settings"
+    )
     p_add.add_argument("paths", nargs="+")
+    # Every default is None: only a flag that was passed reaches the entry, so
+    # adding a directory never stamps the globals into repos.toml.
+    p_add.add_argument(
+        "--spawn",
+        choices=get_args(Spawn),
+        default=None,
+        help="how sessions get their working directory",
+    )
+    p_add.add_argument(
+        "--capacity", type=int, default=None, help="concurrent sessions the supervisor accepts"
+    )
+    p_add.add_argument(
+        "--permission-mode",
+        choices=get_args(PermissionMode),
+        default=None,
+        help="permission mode this directory's sessions start in",
+    )
+    p_add.add_argument(
+        "--create-session-in-dir",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="pre-create a session in the directory itself",
+    )
+    hook = p_add.add_mutually_exclusive_group()
+    # argparse turns a ValueError from `type` into a usage error, so an
+    # unbalanced quote is reported against the flag rather than raised.
+    hook.add_argument(
+        "--post-pull",
+        metavar="CMD",
+        type=shlex.split,
+        help='run after a pull, e.g. "mise install"',
+    )
+    hook.add_argument("--no-post-pull", action="store_true", help="disable the hook for this repo")
     p_remove = sub.add_parser("remove", help="unregister repositories")
     p_remove.add_argument("paths", nargs="+")
     p_clean = sub.add_parser("clean", help="interactively delete spawned worktrees")
@@ -244,7 +314,7 @@ def main() -> int:
         # argparse refuses anything not registered above, so a missing key is a bug.
         commands: dict[str, Callable[[], int]] = {
             "status": lambda: cmd_status(cfg),
-            "add": lambda: cmd_add(cfg, args.paths),
+            "add": lambda: cmd_add(cfg, args.paths, _flags(args)),
             "remove": lambda: cmd_remove(args.paths),
             "clean": lambda: cmd_clean(args.repo),
             "logs": lambda: cmd_logs(args.repo, args.lines, verbatim=args.raw),

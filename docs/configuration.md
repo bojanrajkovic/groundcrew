@@ -68,7 +68,26 @@ that repo. Changing a setting takes effect through drift: restart the daemon
 and each affected supervisor converges once its sessions are quiet. Neither
 file has a hot reload.
 
-Set one by editing its entry in `repos.toml`, then restart the daemon.
+`groundcrew add` writes them, and it is add-or-update: run it against an
+already-registered path and it changes only the settings you name, leaving the
+rest alone. With no flags, adding a registered path stays a no-op.
+
+```sh
+groundcrew add ~/Projects/atc --capacity 8 --permission-mode acceptEdits
+groundcrew add ~/Sync/Working --spawn same-dir --post-pull "mise install"
+groundcrew add ~/Projects/atc --no-post-pull    # post_pull = [], hook off here
+```
+
+| Flag | Effect |
+|---|---|
+| `--spawn {worktree,same-dir}` | how sessions get their working directory |
+| `--capacity N` | concurrent sessions the supervisor accepts |
+| `--permission-mode MODE` | one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan` |
+| `--create-session-in-dir` / `--no-create-session-in-dir` | pre-create a session in the repo root, or don't |
+| `--post-pull "mise install"` | the hook command, shell-split into an array |
+| `--no-post-pull` | writes `post_pull = []`, disabling the hook for this repo |
+
+`--post-pull` and `--no-post-pull` are mutually exclusive.
 
 ### Migrating settings out of `config.toml`
 
@@ -92,11 +111,17 @@ yourself and delete them from `config.toml`.
 
 ### Directories git does not manage
 
-A registered directory need not be a git repository. Scratch directories work
-under `spawn = "same-dir"`; `groundcrew add` refuses one under `spawn =
-"worktree"`, which needs a repository to create worktrees in, and the daemon
-holds the same line if the setting changes later. Freshness pulls report
-`not-a-repo` and do nothing.
+A registered directory need not be a git repository. `groundcrew add` infers
+`spawn = "same-dir"` for one and reports what it did:
+
+```
+added /home/user/Sync/Working — not a git repository, so spawn = "same-dir"; trust seeded
+```
+
+Passing `--spawn worktree` for a non-git directory is still refused: worktree
+spawns need a repository to create worktrees in, and the daemon holds the same
+line if the setting changes later. Freshness pulls report `not-a-repo` and do
+nothing.
 
 ### What `create_session_in_dir` costs
 
