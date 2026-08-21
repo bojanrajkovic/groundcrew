@@ -24,17 +24,14 @@ A per-session child process the supervisor spawns to run one Claude session.
 _Avoid_: session process, child
 
 **Registry**:
-The machine-written list of repos groundcrew manages (`repos.toml`).
-Maintained by `groundcrew add` / `remove`; never holds settings.
+The machine-written list of directories groundcrew manages (`repos.toml`),
+each entry carrying the settings that differ from the global defaults.
+Maintained by `groundcrew add` / `remove`.
 _Avoid_: repo list, config
 
 **Config**:
-The human-written settings file (`config.toml`). Never rewritten by
-groundcrew.
-
-**Override**:
-A per-repo settings table in the config that replaces a global setting for
-one repo.
+The human-written **global** settings file (`config.toml`). Never rewritten
+by groundcrew.
 
 **Notifier**:
 The user-configured command groundcrew invokes to deliver a daemon alert.

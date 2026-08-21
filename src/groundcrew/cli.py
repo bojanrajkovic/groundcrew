@@ -15,6 +15,8 @@ from groundcrew.config import (
     EX_CONFIG,
     Config,
     ConfigError,
+    _RegistryEntry,
+    effective,
     load,
     load_registry,
     repo_path,
@@ -22,31 +24,36 @@ from groundcrew.config import (
     state_dir,
 )
 from groundcrew.daemon import FleetState, run_daemon
+from groundcrew.migrate import migrate_config
 from groundcrew.supervise import RepoState
 
 
 def _needs_same_dir(repo: Path) -> str:
-    """The refusal, carrying the resolved path the override has to be keyed by."""
+    """The refusal, spelling the entry that would let this directory in."""
     return (
         f'refused {repo}: not a git repository, and spawn is "worktree", which needs one.\n'
-        f"add this to config.toml, then retry:\n\n"
-        f'    [repos."{repo}"]\n'
+        f"add this to repos.toml, then retry:\n\n"
+        f"    [[repos]]\n"
+        f'    path = "{repo}"\n'
         f'    spawn = "same-dir"\n'
     )
 
 
 def cmd_add(cfg: Config, paths: list[str]) -> int:
     registry = load_registry()
+    known = {entry.path: entry for entry in registry}
     to_add: list[Path] = []
     for raw in paths:
         repo = repo_path(raw)
         if not repo.is_dir():
             print(f"skip {repo}: not a directory")
             continue
+        entry = known.get(repo)
+        settings = effective(cfg.defaults, entry) if entry else cfg.defaults
         if gitops.is_git_repo(repo):
             if not gitops.has_remote(repo):
                 print(f"note {repo}: no git remote; pulls will be skipped")
-        elif cfg.for_repo(repo).spawn == "worktree":
+        elif settings.spawn == "worktree":
             print(_needs_same_dir(repo))
             continue
         else:
@@ -55,10 +62,11 @@ def cmd_add(cfg: Config, paths: list[str]) -> int:
     if not to_add:
         return 1
     seeded = claude_state.seed_trust(to_add)
-    save_registry(registry + to_add)
+    # Re-adding a registered directory leaves its entry alone; only new ones are written.
+    save_registry(registry + [_RegistryEntry(path=r) for r in to_add if r not in known])
     for repo in to_add:
         trust = "trust seeded" if repo in seeded else "already trusted"
-        already = " (already registered)" if repo in registry else ""
+        already = " (already registered)" if repo in known else ""
         print(f"added {repo} — {trust}{already}")
     print("the daemon picks these up within 30 seconds")
     return 0
@@ -69,10 +77,11 @@ def cmd_remove(paths: list[str]) -> int:
     remaining = list(registry)
     for raw in paths:
         repo = repo_path(raw)
-        if repo not in remaining:
+        entry = next((e for e in remaining if e.path == repo), None)
+        if entry is None:
             print(f"skip {repo}: not registered")
             continue
-        remaining.remove(repo)
+        remaining.remove(entry)
         print(f"removed {repo} — the daemon retires its supervisor once its sessions go quiet")
     if remaining != registry:
         save_registry(remaining)
@@ -141,10 +150,6 @@ def cmd_status(cfg: Config) -> int:
     print(header)
     for path_str in sorted(state.repos):
         _print_repo_row(path_str, state.repos[path_str], sessions, root, now)
-
-    unmatched = sorted(str(p) for p in cfg.overrides if str(p) not in state.registered)
-    for path_str in unmatched:
-        print(f"⚠ config override for unregistered repo: {path_str}")
 
     if state.unregistered:
         print()
@@ -226,24 +231,28 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # Both files are read lazily — config.toml here, repos.toml inside the
+    # commands that touch it — so one handler covers both. The migration goes
+    # first: the file schema has no `repos` key, so a config still holding the
+    # old per-repo tables fails to load rather than reaching it.
     try:
+        migrate_config()
         cfg = load()
+        if args.command == "daemon":
+            run_daemon(cfg)  # runs until signalled, so it is not one of the table's calls
+            return 0
+        # argparse refuses anything not registered above, so a missing key is a bug.
+        commands: dict[str, Callable[[], int]] = {
+            "status": lambda: cmd_status(cfg),
+            "add": lambda: cmd_add(cfg, args.paths),
+            "remove": lambda: cmd_remove(args.paths),
+            "clean": lambda: cmd_clean(args.repo),
+            "logs": lambda: cmd_logs(args.repo, args.lines, verbatim=args.raw),
+        }
+        return commands[args.command]()
     except ConfigError as exc:
         print(exc, file=sys.stderr)
         return EX_CONFIG
-
-    if args.command == "daemon":
-        run_daemon(cfg)  # runs until signalled, so it is not one of the table's calls
-        return 0
-    # argparse refuses anything not registered above, so a missing key is a bug.
-    commands: dict[str, Callable[[], int]] = {
-        "status": lambda: cmd_status(cfg),
-        "add": lambda: cmd_add(cfg, args.paths),
-        "remove": lambda: cmd_remove(args.paths),
-        "clean": lambda: cmd_clean(args.repo),
-        "logs": lambda: cmd_logs(args.repo, args.lines, verbatim=args.raw),
-    }
-    return commands[args.command]()
 
 
 if __name__ == "__main__":

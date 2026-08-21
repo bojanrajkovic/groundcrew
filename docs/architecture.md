@@ -67,11 +67,11 @@ must not become the supervisor.
 supervisor's argv is derived from its repo's effective settings with defaults
 emitted explicitly, so a live process's command line always states its
 configuration; a supervisor differing from the desired (version, args) pair
-restarts once quiet, through the ramp. That makes "edit config, restart the
-daemon" the entire reconfiguration story — there is no hot reload, because a
-daemon restart is free (children survive and are re-adopted, hand-started
-supervisors included, whatever their spawn mode) and adopted supervisors with
-stale arguments converge as args-drift.
+restarts once quiet, through the ramp. That makes "edit `config.toml` or
+`repos.toml`, restart the daemon" the entire reconfiguration story — there is no
+hot reload for either file, because a daemon restart is free (children survive
+and are re-adopted, hand-started supervisors included, whatever their spawn
+mode) and adopted supervisors with stale arguments converge as args-drift.
 
 A freshness pull rewrites the main checkout, so it is skipped whenever a live
 session is working *in* that checkout — every session under `spawn =
