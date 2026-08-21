@@ -135,17 +135,23 @@ def _report(migrated: list[_RegistryEntry], dropped: list[_RegistryEntry], backu
     The list under each heading is the count, so the sentences do not carry
     one. The backup is named either way: a run that only drops tables still
     rewrites config.toml, and that is the run nobody asked for.
+
+    Flushed, because `groundcrew daemon` migrates too and then runs until it is
+    signalled. Python only flushes a block-buffered stdout at interpreter exit,
+    so an unflushed report reaches the journal days later or never — and a
+    dropped table's settings exist nowhere else.
     """
+    lines = []
     if migrated:
-        print("migrated per-repo settings from config.toml to repos.toml:")
-        for entry in migrated:
-            print(f"  {entry.path} — {', '.join(_settings(entry)) or 'nothing set'}")
+        lines.append("migrated per-repo settings from config.toml to repos.toml:")
+        lines += [f"  {e.path} — {', '.join(_settings(e)) or 'nothing set'}" for e in migrated]
     if dropped:
-        print("dropped per-repo settings for directories that are not registered:")
+        lines.append("dropped per-repo settings for directories that are not registered:")
         for entry in dropped:
             held = ", ".join(f"{k} = {json.dumps(v)}" for k, v in _settings(entry).items())
-            print(f"  {entry.path} — {held or 'nothing set'}")
-    print(f"config.toml was rewritten; the original is {backup.name}")
+            lines.append(f"  {entry.path} — {held or 'nothing set'}")
+    lines.append(f"config.toml was rewritten; the original is {backup.name}")
+    print("\n".join(lines), flush=True)
 
 
 def migrate_config() -> None:

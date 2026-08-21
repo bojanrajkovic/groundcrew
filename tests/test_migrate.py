@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 from textwrap import dedent
 
@@ -414,3 +417,32 @@ def test_a_drop_only_migration_still_names_the_backup(
     out = capsys.readouterr().out
     assert "config.toml.bak" in out
     assert (sandbox / "config" / "config.toml.bak").read_text() != ""
+
+
+def test_the_report_survives_a_process_that_never_exits(sandbox: Path) -> None:
+    """`groundcrew daemon` migrates, then runs until it is signalled.
+
+    Python flushes a block-buffered stdout at interpreter exit, which a daemon
+    never reaches, so `os._exit` here stands in for the real thing. A dropped
+    table's settings are recorded nowhere but this report.
+    """
+    (working,) = register(sandbox, "Working")
+    config_toml(sandbox, f'[repos."{working}"]\nspawn = "same-dir"\n')
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os; from groundcrew.migrate import migrate_config;"
+                " migrate_config(); os._exit(0)"
+            ),
+        ],
+        capture_output=True,  # a pipe, so stdout is block-buffered as under systemd
+        text=True,
+        env=dict(os.environ),
+        check=False,
+    )
+
+    assert "migrated per-repo settings" in proc.stdout
+    assert str(working) in proc.stdout
