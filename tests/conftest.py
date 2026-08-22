@@ -86,10 +86,14 @@ def write_session(
     session_id: str,
     cwd: str,
     started_at_ms: int,
-    *,
-    entrypoint: str | None = None,
+    **fields: object,
 ) -> None:
-    """Write the metadata file a running engine leaves in ~/.claude/sessions."""
+    """Write the metadata file a running engine leaves in ~/.claude/sessions.
+
+    Extra keywords are written to the JSON under their own names. A bridge
+    engine carries both `entrypoint` and `bridgeSessionId`; a headless
+    `claude -p` run carries only `entrypoint`.
+    """
     sessions = claude_home() / "sessions"
     sessions.mkdir(parents=True, exist_ok=True)
     data: dict[str, object] = {
@@ -98,7 +102,6 @@ def write_session(
         "cwd": cwd,
         "startedAt": started_at_ms,
         "version": "2.1.233",
+        **fields,
     }
-    if entrypoint is not None:
-        data["entrypoint"] = entrypoint
     (sessions / f"{pid}.json").write_text(json.dumps(data))

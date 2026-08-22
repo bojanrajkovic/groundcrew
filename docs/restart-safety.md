@@ -94,6 +94,12 @@ supervisor was launched to create. `--create-session-in-dir` in a running
 process's argv records the request, not the result, and archiving leaves the
 flag behind. Both have to hold — launched with an anchor, and one still there.
 
+Both gates count only the supervisor's own sessions, not every Claude process
+in the directory. Session metadata records the owner in `bridgeSessionId`, which
+only engines carry. A headless `claude -p` run reports the same `entrypoint` as
+an engine, so `entrypoint` cannot tell the two apart. A cron routine in a
+supervised directory neither dies with the supervisor nor delays its restart.
+
 A repo running without an in-dir session defers until its sessions end, and
 `groundcrew status` reports the deferral. Version convergence waits on that, so
 a repo whose sessions never end stays on its launched version until they are

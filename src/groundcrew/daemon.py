@@ -321,9 +321,14 @@ class Daemon:
         # overshoots: create_session_in_dir parks an idle anchor session in the
         # root for the supervisor's whole life, and deferring to it would retire
         # the pull altogether.
+        #
+        # Every session in the checkout counts, not just the supervisor's. A
+        # pull rewrites files, so a cron `claude -p` run or a person working by
+        # hand blocks one just as an engine does. Ownership answers a different
+        # question: which sessions die with a restart.
         working = sum(
             1
-            for s in claude_state.repo_sessions(path)
+            for s in claude_state.live_sessions()
             if s.cwd == path and not claude_state.session_quiet(s, self.cfg.quiet_seconds, now)
         )
         git = gitops.is_git_repo(path)
