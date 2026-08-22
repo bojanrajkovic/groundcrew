@@ -501,8 +501,9 @@ class SupervisedRepo:
         every session there, and worktree mode still leaves the in-dir session
         there. Presence alone overshoots in the other direction, since
         `create_session_in_dir` parks an idle anchor session in the root and
-        never takes it away. The shell counts root sessions that are not quiet,
-        so neither a launch setting nor an idle anchor is re-derived here.
+        never takes it away. The shell counts every session in the root that is
+        not quiet, whoever owns it, so neither a launch setting nor an idle
+        anchor is re-derived here.
         """
         for kind in (
             WarningKind.PARKED,

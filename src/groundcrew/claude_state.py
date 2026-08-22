@@ -111,6 +111,7 @@ class SessionInfo:
     started_at: float  # unix seconds
     version: str | None
     entrypoint: str | None = None  # "sdk-cli" for remote-control engines
+    bridge_session_id: str | None = None  # "session_…" only for bridge-owned engines
 
 
 def live_sessions() -> list[SessionInfo]:
@@ -139,6 +140,7 @@ def live_sessions() -> list[SessionInfo]:
             continue
         version = data.get("version")
         entrypoint = data.get("entrypoint")
+        bridge = data.get("bridgeSessionId")
         out.append(
             SessionInfo(
                 pid=pid,
@@ -147,23 +149,26 @@ def live_sessions() -> list[SessionInfo]:
                 started_at=started_ms / 1000 if isinstance(started_ms, (int, float)) else 0.0,
                 version=version if isinstance(version, str) else None,
                 entrypoint=entrypoint if isinstance(entrypoint, str) else None,
+                bridge_session_id=bridge if isinstance(bridge, str) else None,
             )
         )
     return out
 
 
 def rc_sessions_for(repo: Path, sessions: list[SessionInfo]) -> list[SessionInfo]:
-    """Remote-control engine sessions in the repo (worktrees included) — the ones
-    a supervisor restart kills.
+    """The repo's engine sessions, worktrees included: the ones a restart kills.
 
-    Interactive sessions (entrypoint "cli"/"claude-desktop") that happen to have
-    their cwd inside a repo are independent processes; they neither die with the
-    supervisor nor should they block its restarts.
+    Only bridge-owned engines carry `bridgeSessionId`, so it identifies them.
+    `entrypoint` does not, because a headless `claude -p` run reports "sdk-cli"
+    like an engine. Counting such a run defers the supervisor's restarts behind
+    a job it does not own, until the stuck-stop alert fires. Interactive
+    sessions ("cli" and "claude-desktop") survive a restart, so they do not
+    count either.
     """
     return [
         s
         for s in sessions
-        if s.entrypoint == "sdk-cli" and (s.cwd == repo or s.cwd.is_relative_to(repo))
+        if s.bridge_session_id is not None and (s.cwd == repo or s.cwd.is_relative_to(repo))
     ]
 
 

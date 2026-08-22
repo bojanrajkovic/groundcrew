@@ -65,18 +65,43 @@ def test_live_sessions_skips_dead_and_recycled_pids(sandbox: Path) -> None:
     assert claude_state.live_sessions() == []
 
 
-def test_rc_sessions_for_filters_cwd_and_entrypoint(sandbox: Path) -> None:
+def engine(pid: int, sid: str, cwd: Path) -> claude_state.SessionInfo:
+    """A remote-control engine session: sdk-cli, and owned by a bridge session."""
+    return claude_state.SessionInfo(
+        pid, sid, cwd, 0, None, entrypoint="sdk-cli", bridge_session_id=f"session_{sid}"
+    )
+
+
+def test_rc_sessions_for_filters_cwd(sandbox: Path) -> None:
     repo = Path("/home/x/proj")
     wt = repo / ".claude" / "worktrees" / "wt"
-    in_worktree = claude_state.SessionInfo(1, "a", wt, 0, None, entrypoint="sdk-cli")
-    at_root = claude_state.SessionInfo(2, "b", repo, 0, None, entrypoint="sdk-cli")
-    outside = claude_state.SessionInfo(3, "c", Path("/home/x/other"), 0, None, entrypoint="sdk-cli")
+    in_worktree = engine(1, "a", wt)
+    at_root = engine(2, "b", repo)
+    outside = engine(3, "c", Path("/home/x/other"))
     interactive = claude_state.SessionInfo(4, "d", repo, 0, None, entrypoint="cli")
     desktop = claude_state.SessionInfo(5, "e", repo / "sub", 0, None, entrypoint="claude-desktop")
 
     got = claude_state.rc_sessions_for(repo, [in_worktree, at_root, outside, interactive, desktop])
 
     assert [s.session_id for s in got] == ["a", "b"]
+
+
+def test_rc_sessions_for_skips_headless_runs_that_are_not_the_supervisors(
+    sandbox: Path,
+) -> None:
+    """A headless `claude -p` run reports entrypoint "sdk-cli" too.
+
+    Counting one as a supervisor's session defers that supervisor's restarts
+    behind a job it does not own. A long-running routine holds the deferral
+    until the stuck-stop alert fires. Only bridge-owned sessions carry
+    `bridgeSessionId`.
+    """
+    repo = Path("/home/x/proj")
+    cron = claude_state.SessionInfo(1, "a", repo / "sub", 0, None, entrypoint="sdk-cli")
+
+    assert claude_state.rc_sessions_for(repo, [cron, engine(2, "b", repo)]) == [
+        engine(2, "b", repo)
+    ]
 
 
 def test_quiet_detection_uses_transcript_mtime(sandbox: Path) -> None:
@@ -178,7 +203,12 @@ def test_repo_quiet_composes_fresh_session_state(sandbox: Path) -> None:
         # does — otherwise live_sessions() reads the child as a PID recycler.
         now = time.time()
         write_session(
-            child.pid, "sess-rc", str(repo / "sub"), int(now * 1000), entrypoint="sdk-cli"
+            child.pid,
+            "sess-rc",
+            str(repo / "sub"),
+            int(now * 1000),
+            entrypoint="sdk-cli",
+            bridgeSessionId="session_rc",
         )
 
         # a session that just started is not quiet…
@@ -187,6 +217,27 @@ def test_repo_quiet_composes_fresh_session_state(sandbox: Path) -> None:
         assert claude_state.repo_quiet(repo, quiet_seconds=0, now=now)
         # a repo with no sessions is quiet
         assert claude_state.repo_quiet(sandbox / "projects" / "other", 900, now)
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_repo_quiet_ignores_a_headless_run_in_the_repo(sandbox: Path) -> None:
+    """A `claude -p` routine writes a real metadata file with no bridge id.
+
+    The census must skip it. Otherwise a cron job running in a repo blocks that
+    repo's restarts.
+    """
+    repo = sandbox / "projects" / "repo"
+    child = subprocess.Popen(["sleep", "30"])
+    try:
+        now = time.time()
+        write_session(
+            child.pid, "sess-cron", str(repo / "sub"), int(now * 1000), entrypoint="sdk-cli"
+        )
+
+        assert claude_state.repo_sessions(repo) == []
+        assert claude_state.repo_quiet(repo, quiet_seconds=900, now=now)
     finally:
         child.kill()
         child.wait()

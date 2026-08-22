@@ -110,11 +110,40 @@ def test_freshen_skips_the_pull_while_a_session_works_in_the_main_checkout(
             str(repo),
             int(time.time() * 1000),
             entrypoint="sdk-cli",
+            bridgeSessionId="session_rc",
         )
         daemon.freshen(repo, daemon.repo(entry(repo)), time.time())
     finally:
         engine.kill()
         engine.wait()
+
+    assert git(repo, "rev-parse", "HEAD").stdout.strip() == before
+    assert WarningKind.DEFERRED in daemon.repo(entry(repo)).warnings
+
+
+def test_freshen_waits_on_a_headless_run_in_the_checkout(sandbox: Path) -> None:
+    """A cron `claude -p` is not an engine, but a pull still rewrites its files.
+
+    Restart safety asks who owns a session; a pull asks who is editing it. A
+    routine working in the checkout blocks a pull just as an engine does.
+    """
+    root = sandbox / "projects"
+    origin = make_repo(root / "origin")
+    repo = clone(origin, root / "repo")
+    add_origin_commit(origin)
+    before = git(repo, "rev-parse", "HEAD").stdout.strip()
+    daemon = Daemon(config.load())
+
+    cron = subprocess.Popen(["sleep", "30"])
+    try:
+        # no bridgeSessionId: this is not the supervisor's session
+        write_session(
+            cron.pid, "sess-cron", str(repo), int(time.time() * 1000), entrypoint="sdk-cli"
+        )
+        daemon.freshen(repo, daemon.repo(entry(repo)), time.time())
+    finally:
+        cron.kill()
+        cron.wait()
 
     assert git(repo, "rev-parse", "HEAD").stdout.strip() == before
     assert WarningKind.DEFERRED in daemon.repo(entry(repo)).warnings
@@ -143,6 +172,7 @@ def test_freshen_pulls_past_an_idle_in_dir_session(sandbox: Path) -> None:
             str(repo),
             int(time.time() * 1000),
             entrypoint="sdk-cli",
+            bridgeSessionId="session_rc",
         )
         daemon.freshen(repo, daemon.repo(entry(repo)), time.time() + config.QUIET_SECONDS + 60)
     finally:
@@ -267,6 +297,7 @@ def test_converge_spares_a_supervisor_whose_session_waits_on_a_background_task(
             str(repo / "wt"),
             int(time.time() * 1000),
             entrypoint="sdk-cli",
+            bridgeSessionId="session_rc",
         )
         daemon.converge(repo, sr, sessions=[])
     finally:
@@ -298,7 +329,12 @@ def test_converge_spares_a_drifted_supervisor_that_would_lose_its_sessions(
     engine = subprocess.Popen(["sleep", "30"])
     try:
         write_session(
-            engine.pid, "sess-rc", str(repo / "wt"), int(time.time() * 1000), entrypoint="sdk-cli"
+            engine.pid,
+            "sess-rc",
+            str(repo / "wt"),
+            int(time.time() * 1000),
+            entrypoint="sdk-cli",
+            bridgeSessionId="session_rc",
         )
         daemon.converge(repo, sr, sessions=[])
     finally:
