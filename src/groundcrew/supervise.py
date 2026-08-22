@@ -237,7 +237,10 @@ def match_orphans(
             created=proc.created,
             launched_version=None,  # resolved later from the process exe or engine metadata
             launched_args=proc.argv[1:],  # drop the binary path
-            spawned_at=time.time(),
+            # The process's own start, not this adoption: a daemon restart
+            # re-adopts the fleet, and dating adoptees from that would make every
+            # supervisor look freshly started to the checks that wait out startup.
+            spawned_at=proc.created,
             handle=None,
         )
     return adopted

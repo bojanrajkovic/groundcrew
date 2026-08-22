@@ -65,6 +65,21 @@ def test_registered_repo_adopted_with_args(tmp_path: Path) -> None:
     assert sup.handle is None
 
 
+def test_an_adopted_supervisor_is_dated_from_the_process(tmp_path: Path) -> None:
+    """`spawned_at` is how long the supervisor has run, not how long we have known it.
+
+    Every daemon restart re-adopts the whole fleet. Dating an adoptee from the
+    adoption makes it look freshly started, which suppresses the checks that
+    wait out a supervisor's startup, such as `_anchor_lost`.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    adopted = match_orphans([rec(41, repo, created=12345.0)], tmp_path, [repo])
+
+    assert adopted[repo].spawned_at == 12345.0
+
+
 def test_unregistered_git_repo_under_root_adopted(tmp_path: Path) -> None:
     stray = tmp_path / "stray"
     (stray / ".git").mkdir(parents=True)
