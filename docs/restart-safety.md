@@ -80,6 +80,54 @@ Archiving is also the way to release a stop by hand. A repo that defers
 indefinitely — sessions that never go quiet, or no anchor to reconnect through —
 converges as soon as its sessions are archived.
 
+## Losing the anchor
+
+A supervisor loses its anchor two ways: the session is archived, or the
+session's engine fails on resume. In the second case the replacement supervisor
+reattaches the session, the engine exits within seconds, and capacity returns to
+zero:
+
+```
+·|· Connecting · Working · HEAD
+    Capacity: 1/32 · Attached
+[04:29:34] Session failed: Process exited with error cse_01Ho7…
+·✔︎· Ready · Working · HEAD
+    Capacity: 0/32
+```
+
+The result is the same either way, because the anchor is created once at
+startup and never re-created. The supervisor keeps serving sessions. Its next
+restart abandons the environment, and until then every drift restart defers.
+
+groundcrew treats a lost anchor as a third kind of drift, alongside a stale
+binary and stale launch arguments. It replaces the supervisor through the same
+two gates and the same spawn ramp. A supervisor that is still starting has no
+anchor yet, so the check waits out a grace window first.
+
+It replaces the supervisor once. If the replacement also comes up anchorless,
+the session is broken and further restarts will not help. groundcrew stops
+there: `status` shows a warning, and a deferral lasting more than a day raises
+an alert.
+
+Archiving the session repairs it, but not immediately. groundcrew cannot observe
+an archive, because a supervisor that lost its anchor and a repo with nothing
+left to reattach both report zero sessions. The brake holds until something else
+replaces the supervisor, such as a new `claude` release or an edited setting.
+That replacement finds nothing to reattach, creates a fresh anchor, and clears
+the brake.
+
+Waiting is safe. The repo keeps serving sessions, and a supervisor with live
+sessions and no anchor already defers its stops. It stops converging, and
+`status` reports that.
+
+```mermaid
+flowchart LR
+    L["anchor lost"] --> R["replace once"]
+    R --> OK["replacement has an anchor<br>→ converged"]
+    R --> NO["replacement has none either<br>→ warn, alert, wait"]
+    NO -->|"archive the session,<br>then any other restart"| OK
+```
+
 ## The two gates
 
 Stopping a supervisor — for drift or for retirement — requires both:

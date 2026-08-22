@@ -37,6 +37,7 @@ from pydantic import BaseModel
 
 from groundcrew.claude_state import proc_create_time, process_is
 from groundcrew.config import (
+    ANCHOR_GRACE_SECONDS,
     BACKOFF_SECONDS,
     CRASH_LIMIT,
     CRASH_WINDOW_SECONDS,
@@ -326,6 +327,7 @@ class WarningKind(enum.Enum):
     POST_PULL = "post_pull"
     DEFERRED = "deferred"
     DRIFT = "drift"  # plan_drift
+    ANCHOR = "anchor"
     UNTRUSTED = "untrusted"  # plan_supervision
     MISSING = "missing"
     NO_GIT = "no_git"
@@ -409,6 +411,8 @@ class SupervisedRepo:
     last_pull_detail: str = ""
     stop_deferred_since: float = 0.0
     stop_alerted: bool = False
+    # (pid, created) of the supervisor already swapped out for a lost anchor
+    anchor_replaced: tuple[int, float] | None = None
     warnings: dict[WarningKind, str] = field(default_factory=dict)
 
     def strands_sessions(self, census: SessionCensus) -> bool:
@@ -427,6 +431,34 @@ class SupervisedRepo:
             return False
         launched_anchored = NO_IN_DIR_SESSION not in sup.launched_args
         return bool(census.total) and not (launched_anchored and census.anchored)
+
+    def _anchor_lost(self, sup: Supervisor, census: SessionCensus, now: float) -> bool:
+        """Was this supervisor launched to hold an anchor, and does it hold none?
+
+        The anchor is created once, at startup, and never re-created. It is lost
+        when its engine fails on resume, or when the session is archived from the
+        web UI. Either leaves a supervisor still running
+        `--create-session-in-dir` with no anchor behind it, and only a
+        replacement restores one. Until then every restart loses the environment.
+
+        The grace window covers startup, when a supervisor has not created its
+        anchor yet because it has not finished connecting.
+        """
+        if NO_IN_DIR_SESSION in sup.launched_args or census.anchored:
+            return False
+        return now - sup.spawned_at >= ANCHOR_GRACE_SECONDS
+
+    def _retry_spent(self, sup: Supervisor) -> bool:
+        """Did the one anchor restart already produce a replacement, anchorless too?
+
+        Spent means a different process is running now. Identity is
+        (pid, created) rather than a bare pid, for the same reason every other
+        process check here uses the pair: a recycled pid reads as the same
+        supervisor and would re-arm the restart this stops. A failed termination
+        leaves the original process in place, which is not a replacement, so it
+        still gets its retry.
+        """
+        return self.anchor_replaced is not None and self.anchor_replaced != (sup.pid, sup.created)
 
     # -- supervision ------------------------------------------------------
 
@@ -572,7 +604,12 @@ class SupervisedRepo:
         sessions: SessionCensus,
         now: float,
     ) -> Restart | Defer | None:
-        """Does the supervisor match the desired (version, args) pair? None = converged.
+        """Is the supervisor still the one this repo wants? None = converged.
+
+        Three things make it the wrong one: a stale binary, stale launch
+        arguments, and a lost in-dir anchor. All three are fixed by replacing
+        the supervisor and pass the same gates, so they are one decision with up
+        to three reasons.
 
         probed_version fills a hole adoption leaves open (adoptees carry no
         launched_version); the shell observes it, the owner records it here.
@@ -583,34 +620,36 @@ class SupervisedRepo:
         in-dir session, however idle they look. See docs/restart-safety.md.
         """
         self.warnings.pop(WarningKind.DRIFT, None)
+        self.warnings.pop(WarningKind.ANCHOR, None)
         sup = self.supervisor
         if sup is None or binary_version is None:
             return None
         if sup.launched_version is None and probed_version is not None:
             sup.launched_version = probed_version
+        if sessions.anchored:
+            self.anchor_replaced = None
         reasons = []
         if sup.launched_version != binary_version:
             reasons.append(f"version {sup.launched_version} -> {binary_version}")
         if sup.launched_args != rc_args(self.settings):
             reasons.append("args")
+        anchor_lost = self._anchor_lost(sup, sessions, now)
+        if anchor_lost:
+            reasons.append("anchor lost")
         if not reasons:
             self.stop_deferred_since = 0.0
             self.stop_alerted = False
             return None
         reason = " + ".join(reasons)
-        if self.strands_sessions(sessions):
-            self.warnings[WarningKind.DRIFT] = (
-                f"drift ({reason}): restart deferred, would lose {sessions.total} session(s) "
-                "— no in-dir session to reconnect through"
-            )
-            stuck = self._stuck_alert(now, "drift restart", f"{sessions.total} session(s) blocking")
-            return Defer(reason, stuck)
-        if not quiet:
-            self.warnings[WarningKind.DRIFT] = (
-                f"drift ({reason}): restart deferred, session(s) active"
-            )
-            stuck = self._stuck_alert(now, "drift restart", "session(s) busy")
-            return Defer(reason, stuck)
+        blocked = self._blocked(
+            reason,
+            spent_anchor_retry=anchor_lost and len(reasons) == 1 and self._retry_spent(sup),
+            quiet=quiet,
+            sessions=sessions,
+            now=now,
+        )
+        if blocked is not None:
+            return blocked
         self.stop_deferred_since = 0.0
         self.stop_alerted = False
         # The environment survives, but each session that has taken a turn loses
@@ -626,7 +665,46 @@ class SupervisedRepo:
             if sessions.working
             else None
         )
+        if anchor_lost:
+            self.anchor_replaced = (sup.pid, sup.created)
         return Restart(reason, interrupted)
+
+    def _blocked(
+        self,
+        reason: str,
+        *,
+        spent_anchor_retry: bool,
+        quiet: bool,
+        sessions: SessionCensus,
+        now: float,
+    ) -> Defer | None:
+        """What stops this restart, if anything. Costliest objection first."""
+        if spent_anchor_retry:
+            # The replacement came up anchorless too, so the session it keeps
+            # reattaching is broken and another restart changes nothing.
+            # Archiving it is the repair, but nothing here can observe one: an
+            # anchorless supervisor and a repo with nothing left to reattach both
+            # read as zero sessions. The brake holds until a restart for some
+            # other reason picks the change up.
+            self.warnings[WarningKind.ANCHOR] = (
+                "anchor lost: a replacement supervisor came up without one either "
+                "— archive the repo's session; the next restart then creates one"
+            )
+            stuck = self._stuck_alert(now, "anchor restart", "the replacement had no anchor either")
+            return Defer(reason, stuck)
+        if self.strands_sessions(sessions):
+            self.warnings[WarningKind.DRIFT] = (
+                f"drift ({reason}): restart deferred, would lose {sessions.total} session(s) "
+                "— no in-dir session to reconnect through"
+            )
+            stuck = self._stuck_alert(now, "drift restart", f"{sessions.total} session(s) blocking")
+            return Defer(reason, stuck)
+        if not quiet:
+            self.warnings[WarningKind.DRIFT] = (
+                f"drift ({reason}): restart deferred, session(s) active"
+            )
+            return Defer(reason, self._stuck_alert(now, "drift restart", "session(s) busy"))
+        return None
 
     def _stuck_alert(self, now: float, what: str, detail: str) -> Alert | None:
         """The alert for a stop deferred past the threshold, once per deferral."""
