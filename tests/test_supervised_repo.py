@@ -32,15 +32,23 @@ def entity(settings: RepoSettings | None = None) -> SupervisedRepo:
     return SupervisedRepo(path=Path("/projects/demo"), settings=settings or RepoSettings())
 
 
-def supervisor(settings: RepoSettings | None = None, version: str | None = "1.0.0") -> Supervisor:
+def supervisor(
+    settings: RepoSettings | None = None, version: str | None = "1.0.0", pid: int = 1234
+) -> Supervisor:
     return Supervisor(
         repo=Path("/projects/demo"),
-        pid=1234,
+        pid=pid,
         created=42.0,
         launched_version=version,
         launched_args=rc_args(settings or RepoSettings()),
         spawned_at=0.0,
     )
+
+
+# A supervisor launched with `--create-session-in-dir` holding its idle anchor:
+# one session, no turns taken. ANCHORLESS is the same supervisor having lost it.
+HEALTHY = SessionCensus(1, 0, anchored=True)
+ANCHORLESS = SessionCensus(0, 0, anchored=False)
 
 
 # ── supervision planning ────────────────────────────────────────────────────
@@ -345,21 +353,14 @@ def test_converged_supervisor_needs_nothing() -> None:
     repo = entity()
     repo.supervisor = supervisor()
 
-    assert (
-        repo.plan_drift(
-            "1.0.0", None, quiet=True, sessions=SessionCensus(0, 0, anchored=False), now=NOW
-        )
-        is None
-    )
+    assert repo.plan_drift("1.0.0", None, quiet=True, sessions=HEALTHY, now=NOW) is None
 
 
 def test_version_drift_restarts_when_quiet() -> None:
     repo = entity()
     repo.supervisor = supervisor(version="0.9.0")
 
-    decision = repo.plan_drift(
-        "1.0.0", None, quiet=True, sessions=SessionCensus(0, 0, anchored=False), now=NOW
-    )
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=HEALTHY, now=NOW)
 
     assert isinstance(decision, Restart)
     assert "0.9.0 -> 1.0.0" in decision.reason
@@ -369,9 +370,7 @@ def test_args_drift_restarts_when_quiet() -> None:
     repo = entity(RepoSettings(capacity=4))
     repo.supervisor = supervisor()  # args for default capacity 32
 
-    decision = repo.plan_drift(
-        "1.0.0", None, quiet=True, sessions=SessionCensus(0, 0, anchored=False), now=NOW
-    )
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=HEALTHY, now=NOW)
 
     assert isinstance(decision, Restart)
     assert decision.reason == "args"
@@ -381,9 +380,7 @@ def test_combined_drift_names_both_reasons() -> None:
     repo = entity(RepoSettings(capacity=4))
     repo.supervisor = supervisor(version="0.9.0")
 
-    decision = repo.plan_drift(
-        "1.0.0", None, quiet=True, sessions=SessionCensus(0, 0, anchored=False), now=NOW
-    )
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=HEALTHY, now=NOW)
 
     assert isinstance(decision, Restart)
     assert "version" in decision.reason
@@ -394,20 +391,13 @@ def test_drift_defers_with_warning_while_busy_and_clears_when_converged() -> Non
     repo = entity()
     repo.supervisor = supervisor(version="0.9.0")
 
-    decision = repo.plan_drift(
-        "1.0.0", None, quiet=False, sessions=SessionCensus(0, 0, anchored=False), now=NOW
-    )
+    decision = repo.plan_drift("1.0.0", None, quiet=False, sessions=HEALTHY, now=NOW)
 
     assert isinstance(decision, Defer)
     assert WarningKind.DRIFT in repo.warnings
     # converged (e.g. after the shell restarted it): warning clears
     repo.supervisor = supervisor(version="1.0.0")
-    assert (
-        repo.plan_drift(
-            "1.0.0", None, quiet=True, sessions=SessionCensus(0, 0, anchored=False), now=NOW
-        )
-        is None
-    )
+    assert repo.plan_drift("1.0.0", None, quiet=True, sessions=HEALTHY, now=NOW) is None
     assert WarningKind.DRIFT not in repo.warnings
 
 
@@ -415,22 +405,156 @@ def test_probed_version_fills_the_adoption_hole() -> None:
     repo = entity()
     repo.supervisor = supervisor(version=None)  # adopted: version unknown
 
-    assert (
-        repo.plan_drift(
-            "1.0.0", "1.0.0", quiet=True, sessions=SessionCensus(0, 0, anchored=False), now=NOW
-        )
-        is None
-    )
+    assert repo.plan_drift("1.0.0", "1.0.0", quiet=True, sessions=HEALTHY, now=NOW) is None
     assert repo.supervisor.launched_version == "1.0.0"
+
+
+# ── the lost anchor ─────────────────────────────────────────────────────────
+
+
+def test_a_supervisor_that_lost_its_anchor_restarts() -> None:
+    """The anchor is created at startup and never re-created; only a restart brings one back."""
+    repo = entity()
+    repo.supervisor = supervisor()  # launched --create-session-in-dir
+
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW)
+
+    assert isinstance(decision, Restart)
+    assert decision.reason == "anchor lost"
+
+
+def test_a_supervisor_still_starting_has_not_lost_its_anchor() -> None:
+    """A supervisor creates its anchor after it connects, so a starting one has none yet."""
+    repo = entity()
+    repo.supervisor = supervisor()
+    repo.supervisor.spawned_at = NOW
+
+    assert repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW) is None
+
+
+def test_a_supervisor_launched_without_an_anchor_cannot_lose_one() -> None:
+    settings = RepoSettings(create_session_in_dir=False)
+    repo = entity(settings)
+    repo.supervisor = supervisor(settings)
+
+    assert repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW) is None
+
+
+def test_a_lost_anchor_defers_rather_than_strand_worktree_sessions() -> None:
+    """Restarting an anchorless supervisor abandons every session under it."""
+    repo = entity()
+    repo.supervisor = supervisor()
+
+    decision = repo.plan_drift(
+        "1.0.0", None, quiet=True, sessions=SessionCensus(2, 2, anchored=False), now=NOW
+    )
+
+    assert isinstance(decision, Defer)
+    assert WarningKind.DRIFT in repo.warnings
+
+
+def test_a_replacement_that_comes_up_anchorless_too_stops_the_retrying() -> None:
+    """A session whose engine fails on resume is reattached and lost on every start.
+
+    The replacement proves restarting does not fix it, so groundcrew stops there
+    rather than replacing the supervisor once an hour indefinitely.
+    """
+    repo = entity()
+    repo.supervisor = supervisor()
+    assert isinstance(
+        repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW), Restart
+    )
+
+    repo.supervisor = supervisor(pid=5678)  # the shell spawned a replacement; also anchorless
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW)
+
+    assert isinstance(decision, Defer)
+    assert WarningKind.ANCHOR in repo.warnings
+    assert decision.alert is None  # not yet worth waking anybody
+
+
+def test_an_anchor_that_never_returns_alerts_once_a_day_has_passed() -> None:
+    repo = entity()
+    repo.supervisor = supervisor()
+    repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW)
+    repo.supervisor = supervisor(pid=5678)
+    repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW)
+
+    later = NOW + STOP_DEFER_ALERT_SECONDS + 1
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=later)
+
+    assert isinstance(decision, Defer)
+    assert decision.alert is not None
+    # once, not every hour after that
+    again = repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=later)
+    assert isinstance(again, Defer)
+    assert again.alert is None
+
+
+def test_a_termination_that_failed_leaves_the_retry_intact() -> None:
+    """The shell can fail to stop a supervisor, leaving no replacement.
+
+    A different process coming up anchorless spends the retry, not the decision
+    to replace one, so the same supervisor is asked again next pass.
+    """
+    repo = entity()
+    repo.supervisor = supervisor()
+    assert isinstance(
+        repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW), Restart
+    )
+
+    # terminate() returned False: the shell kept the supervisor it has
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW)
+
+    assert isinstance(decision, Restart)
+    assert WarningKind.ANCHOR not in repo.warnings
+
+
+def test_a_recovered_anchor_re_arms_the_retry() -> None:
+    """Once an anchor exists again, the next loss is fresh and gets its own restart."""
+    repo = entity()
+    repo.supervisor = supervisor()
+    repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW)
+
+    repo.supervisor = supervisor(pid=5678)
+    assert repo.plan_drift("1.0.0", None, quiet=True, sessions=HEALTHY, now=NOW) is None
+    assert WarningKind.ANCHOR not in repo.warnings
+
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW)
+    assert isinstance(decision, Restart)
+
+
+def test_version_drift_restarts_even_after_the_anchor_retry_is_spent() -> None:
+    """The anchor brake must not pin a supervisor to an old binary.
+
+    This is also how an archived session is picked up. Nothing local shows the
+    archive, so the repair lands on the next restart that happens anyway.
+    """
+    repo = entity()
+    repo.supervisor = supervisor()
+    repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW)
+    repo.supervisor = supervisor(pid=5678)
+    assert isinstance(
+        repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW), Defer
+    )
+
+    repo.supervisor = supervisor(version="0.9.0", pid=5678)
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=ANCHORLESS, now=NOW)
+
+    assert isinstance(decision, Restart)
+    assert "0.9.0 -> 1.0.0" in decision.reason
+
+    # that replacement found nothing to reattach and made an anchor: brake off
+    repo.supervisor = supervisor(pid=9012)
+    assert repo.plan_drift("1.0.0", None, quiet=True, sessions=HEALTHY, now=NOW) is None
+    assert repo.anchor_replaced is None
 
 
 def test_unprobeable_version_counts_as_drift() -> None:
     repo = entity()
     repo.supervisor = supervisor(version=None)
 
-    decision = repo.plan_drift(
-        "1.0.0", None, quiet=True, sessions=SessionCensus(0, 0, anchored=False), now=NOW
-    )
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=HEALTHY, now=NOW)
 
     assert isinstance(decision, Restart)
 
@@ -542,9 +666,7 @@ def test_restart_with_nothing_running_stays_silent() -> None:
     repo = entity()
     repo.supervisor = supervisor(version="0.9.0")
 
-    decision = repo.plan_drift(
-        "1.0.0", None, quiet=True, sessions=SessionCensus(0, 0, anchored=False), now=NOW
-    )
+    decision = repo.plan_drift("1.0.0", None, quiet=True, sessions=HEALTHY, now=NOW)
 
     assert isinstance(decision, Restart)
     assert decision.alert is None
@@ -592,9 +714,7 @@ def test_deferral_alerts_once_after_a_day_then_resets_on_convergence() -> None:
 def test_freshness_pass_never_erases_the_drift_warning() -> None:
     repo = entity()
     repo.supervisor = supervisor(version="0.9.0")
-    repo.plan_drift(
-        "1.0.0", None, quiet=False, sessions=SessionCensus(0, 0, anchored=False), now=NOW
-    )
+    repo.plan_drift("1.0.0", None, quiet=False, sessions=HEALTHY, now=NOW)
     assert WarningKind.DRIFT in repo.warnings
 
     repo.plan_freshness(git=True, working_sessions=0)

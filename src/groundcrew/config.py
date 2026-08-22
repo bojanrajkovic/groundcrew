@@ -34,6 +34,9 @@ PULL_FAILURES_BEFORE_ALERT = 3
 # A deferred stop is normal. One still deferred a day later means the repo is
 # stuck on its launched version.
 STOP_DEFER_ALERT_SECONDS = 24 * 3600
+# A supervisor creates its in-dir session after it connects. Long enough that a
+# slow connect is not mistaken for a supervisor that failed to create one.
+ANCHOR_GRACE_SECONDS = 5 * 60
 GIT_TIMEOUT = 120
 POST_PULL_TIMEOUT = 600
 UPDATE_TIMEOUT = 600
