@@ -244,6 +244,72 @@ def cmd_status(cfg: Config, *, as_json: bool = False) -> int:
     return 0
 
 
+class SessionRow(BaseModel):
+    """One live session — shared by the table and `--json`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    repo: str
+    worktree: str | None  # None for a same-dir session (no spawned worktree)
+    address: str | None  # matches the name `ListAgents` shows for this peer
+    title: str | None  # best-effort; most sessions never get one
+    session_id: str
+    pid: int
+    branch: str | None
+
+
+def _session_rows(state: FleetState, sessions: list[claude_state.SessionInfo]) -> list[SessionRow]:
+    rows: list[SessionRow] = []
+    for path_str in sorted(state.repos):
+        repo = Path(path_str)
+        by_cwd = {wt.path: wt for wt in gitops.spawned_worktrees(repo)}
+        for s in claude_state.rc_sessions_for(repo, sessions):
+            wt = by_cwd.get(s.cwd)
+            rows.append(
+                SessionRow(
+                    repo=path_str,
+                    worktree=str(wt.path) if wt else None,
+                    address=s.address,
+                    title=claude_state.session_title(s),
+                    session_id=s.session_id,
+                    pid=s.pid,
+                    branch=wt.branch if wt else gitops.current_branch(repo),
+                )
+            )
+    return rows
+
+
+def cmd_sessions(cfg: Config, *, as_json: bool = False) -> int:
+    state_path = state_dir() / "state.json"
+    if not state_path.exists():
+        print("no state file — is the daemon running? (systemctl --user status groundcrew)")
+        return 1
+    try:
+        state = FleetState.model_validate_json(state_path.read_text())
+    except ValidationError as exc:
+        print(f"state file unreadable (daemon version mismatch?): {exc}", file=sys.stderr)
+        return 1
+
+    rows = _session_rows(state, claude_state.live_sessions())
+
+    if as_json:
+        print(json.dumps([row.model_dump(mode="json") for row in rows], indent=2))
+        return 0
+
+    if not rows:
+        print("no live sessions")
+        return 0
+    root = str(cfg.root) + "/"
+    print(f"{'REPO':<34} {'WORKTREE':<38} {'ADDRESS':<38} {'BRANCH':<20} TITLE")
+    for row in rows:
+        wt_name = Path(row.worktree).name if row.worktree else "-"
+        print(
+            f"{row.repo.removeprefix(root):<34} {wt_name:<38} "
+            f"{row.address or '-':<38} {row.branch or '-':<20} {row.title or ''}"
+        )
+    return 0
+
+
 def cmd_clean(raw: str) -> int:
     repo = repo_path(raw)
     worktrees = gitops.spawned_worktrees(repo)
@@ -319,6 +385,8 @@ def main() -> int:
     sub.add_parser("daemon", help="run the supervision daemon (systemd entry point)")
     p_status = sub.add_parser("status", help="show fleet state")
     p_status.add_argument("--json", action="store_true", help="emit headline fields as JSON")
+    p_sessions = sub.add_parser("sessions", help="list supervised repos' live sessions")
+    p_sessions.add_argument("--json", action="store_true", help="emit session rows as JSON")
     p_add = sub.add_parser(
         "add", help="trust + register directories, and set their per-directory settings"
     )
@@ -381,6 +449,7 @@ def main() -> int:
         # argparse refuses anything not registered above, so a missing key is a bug.
         commands: dict[str, Callable[[], int]] = {
             "status": lambda: cmd_status(cfg, as_json=args.json),
+            "sessions": lambda: cmd_sessions(cfg, as_json=args.json),
             "add": lambda: cmd_add(cfg, args.paths, _flags(args)),
             "remove": lambda: cmd_remove(args.paths),
             "clean": lambda: cmd_clean(args.repo),

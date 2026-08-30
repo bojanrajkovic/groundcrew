@@ -11,6 +11,8 @@ groundcrew add <path>...   # seed workspace trust + register (one deliberate ste
 groundcrew remove <path>   # unregister; supervisor retires once its sessions go quiet
 groundcrew status          # fleet table: supervisors, versions, sessions, pulls, warnings
 groundcrew status --json   # the same headline fields, one object per repo
+groundcrew sessions        # live sessions: repo, worktree, address, branch, title
+groundcrew sessions --json # the same rows, plus session id and pid
 groundcrew clean <repo>    # interactively delete spawned worktrees; shows dirty files
                            # AND unmerged commits before asking
 groundcrew daemon          # the long-running process (service entry point)
