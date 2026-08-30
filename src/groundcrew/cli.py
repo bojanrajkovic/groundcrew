@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
 import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import get_args
+from typing import Literal, get_args
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from groundcrew import claude_state, gitops, supervise
 from groundcrew.config import (
@@ -110,36 +111,77 @@ def cmd_remove(paths: list[str]) -> int:
 def _ago(then: float, now: float) -> str:
     if then <= 0:
         return "never"
-    hours, minutes = divmod(int((now - then) / 60), 60)
+    hours, minutes = divmod(max(0, int((now - then) / 60)), 60)
     return f"{hours}h{minutes:02d}m ago" if hours else f"{minutes}m ago"
 
 
-def _print_repo_row(
+class RepoRow(BaseModel):
+    """One repo's headline fields — shared by the table and `--json`.
+
+    Carries raw data (pid, epoch seconds), not pre-rendered display strings, so a
+    `--json` consumer can compare/alert on it without re-parsing human text.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    state: Literal["up", "backoff", "down"]
+    pid: int | None  # set when state == "up"
+    backoff_seconds: int | None  # set when state == "backoff"
+    version: str | None
+    session_count: int
+    quiet_minutes: float | None  # None when session_count == 0
+    last_pull_kind: str | None
+    last_pull_at: float | None  # epoch seconds; None if never pulled
+
+
+def _repo_row(
     path_str: str,
     info: RepoState,
     sessions: list[claude_state.SessionInfo],
-    root: str,
     now: float,
-) -> None:
-    repo = Path(path_str)
+) -> RepoRow:
+    pid: int | None = None
+    backoff_seconds: int | None = None
+    state: Literal["up", "backoff", "down"]
     if info.alive():
-        sup = f"up {info.pid}"
+        state, pid = "up", info.pid
     elif info.backoff_until > now:
-        sup = f"backoff {int((info.backoff_until - now) / 60)}m"
+        state, backoff_seconds = "backoff", max(0, int(info.backoff_until - now))
+    else:
+        state = "down"
+    repo_sessions = claude_state.rc_sessions_for(Path(path_str), sessions)
+    quiet_min = claude_state.quiet_minutes(repo_sessions, now) if repo_sessions else None
+    return RepoRow(
+        path=path_str,
+        state=state,
+        pid=pid,
+        backoff_seconds=backoff_seconds,
+        version=info.version,
+        session_count=len(repo_sessions),
+        quiet_minutes=max(0.0, quiet_min) if quiet_min is not None else None,
+        last_pull_kind=info.last_pull_kind or None,
+        last_pull_at=info.last_pull_at if info.last_pull_at > 0 else None,
+    )
+
+
+def _print_repo_row(row: RepoRow, warnings: list[str], root: str, now: float) -> None:
+    if row.state == "up":
+        sup = f"up {row.pid}"
+    elif row.state == "backoff":
+        sup = f"backoff {(row.backoff_seconds or 0) // 60}m"
     else:
         sup = "DOWN"
-    repo_sessions = claude_state.rc_sessions_for(repo, sessions)
-    if repo_sessions:
-        quiet_min = claude_state.quiet_minutes(repo_sessions, now)
-        sess = f"{len(repo_sessions)} ({quiet_min:.0f}m quiet)"
+    if row.quiet_minutes is not None:
+        sess = f"{row.session_count} ({row.quiet_minutes:.0f}m quiet)"
     else:
         sess = "0"
-    pull = f"{info.last_pull_kind or '-'} {_ago(info.last_pull_at, now)}"
-    name = path_str.removeprefix(root)
-    print(f"{name:<34} {sup:<10} {info.version or '?':<10} {sess:<12} {pull:<22}")
-    for warning in info.warnings:
+    pull = f"{row.last_pull_kind or '-'} {_ago(row.last_pull_at or 0, now)}"
+    name = row.path.removeprefix(root)
+    print(f"{name:<34} {sup:<10} {row.version or '?':<10} {sess:<12} {pull:<22}")
+    for warning in warnings:
         print(f"{'':<34} ⚠ {warning}")
-    for wt in gitops.spawned_worktrees(repo):
+    for wt in gitops.spawned_worktrees(Path(row.path)):
         if wt.dirty_files:
             print(
                 f"{'':<34} ● dirty worktree {wt.path.name}: "
@@ -147,7 +189,7 @@ def _print_repo_row(
             )
 
 
-def cmd_status(cfg: Config) -> int:
+def cmd_status(cfg: Config, *, as_json: bool = False) -> int:
     state_path = state_dir() / "state.json"
     if not state_path.exists():
         print("no state file — is the daemon running? (systemctl --user status groundcrew)")
@@ -158,17 +200,26 @@ def cmd_status(cfg: Config) -> int:
         print(f"state file unreadable (daemon version mismatch?): {exc}", file=sys.stderr)
         return 1
     now = time.time()
+    sessions = claude_state.live_sessions()
+    displays = [
+        (_repo_row(path_str, state.repos[path_str], sessions, now), state.repos[path_str].warnings)
+        for path_str in sorted(state.repos)
+    ]
+
+    if as_json:
+        print(json.dumps([row.model_dump(mode="json") for row, _ in displays], indent=2))
+        return 0
+
     print(f"claude {state.binary_version} · state updated {_ago(state.updated_at, now)}")
     if state.last_update_result:
         print(f"last nightly update: {state.last_update_result}")
 
-    sessions = claude_state.live_sessions()
     root = str(cfg.root) + "/"
     header = f"{'REPO':<34} {'SUP':<10} {'VER':<10} {'SESS':<12} {'LAST PULL':<22}"
     print()
     print(header)
-    for path_str in sorted(state.repos):
-        _print_repo_row(path_str, state.repos[path_str], sessions, root, now)
+    for row, warnings in displays:
+        _print_repo_row(row, warnings, root, now)
 
     if state.unregistered:
         print()
@@ -251,7 +302,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="groundcrew", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("daemon", help="run the supervision daemon (systemd entry point)")
-    sub.add_parser("status", help="show fleet state")
+    p_status = sub.add_parser("status", help="show fleet state")
+    p_status.add_argument("--json", action="store_true", help="emit headline fields as JSON")
     p_add = sub.add_parser(
         "add", help="trust + register directories, and set their per-directory settings"
     )
@@ -313,7 +365,7 @@ def main() -> int:
             return 0
         # argparse refuses anything not registered above, so a missing key is a bug.
         commands: dict[str, Callable[[], int]] = {
-            "status": lambda: cmd_status(cfg),
+            "status": lambda: cmd_status(cfg, as_json=args.json),
             "add": lambda: cmd_add(cfg, args.paths, _flags(args)),
             "remove": lambda: cmd_remove(args.paths),
             "clean": lambda: cmd_clean(args.repo),
