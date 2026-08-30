@@ -1,4 +1,4 @@
-"""Command-line interface: daemon, status, add, remove, clean, logs."""
+"""Command-line interface: daemon, status, sessions, add, remove, clean, logs, skills."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import shlex
 import sys
 import time
 from collections.abc import Callable
+from importlib import resources
 from pathlib import Path
 from typing import Literal, get_args
 
@@ -373,6 +374,18 @@ def cmd_logs(raw: str, lines: int, *, verbatim: bool) -> int:
     return 0
 
 
+def cmd_skills(name: str) -> int:
+    """Print a bundled skill's guidance — usable from any repo, not just this one."""
+    resource = resources.files("groundcrew.skills") / name / "SKILL.md"
+    try:
+        text = resource.read_text()
+    except (FileNotFoundError, NotADirectoryError):
+        print(f"no such skill: {name}", file=sys.stderr)
+        return 1
+    print(text)
+    return 0
+
+
 def _flags(args: argparse.Namespace) -> dict[str, object]:
     """The per-repo settings the flags actually named; every other one stays unset."""
     post_pull = [] if args.no_post_pull else args.post_pull
@@ -444,6 +457,8 @@ def main() -> int:
     p_logs.add_argument(
         "--raw", action="store_true", help="keep the control codes and repeated frames"
     )
+    p_skills = sub.add_parser("skills", help="print a bundled skill's guidance")
+    p_skills.add_argument("name")
     args = parser.parse_args()
 
     # Both files are read lazily — config.toml here, repos.toml inside the
@@ -464,6 +479,7 @@ def main() -> int:
             "remove": lambda: cmd_remove(args.paths),
             "clean": lambda: cmd_clean(args.repo),
             "logs": lambda: cmd_logs(args.repo, args.lines, verbatim=args.raw),
+            "skills": lambda: cmd_skills(args.name),
         }
         return commands[args.command]()
     except ConfigError as exc:
