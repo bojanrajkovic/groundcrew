@@ -10,6 +10,7 @@ upgrades) without ever losing an in-flight session.
 groundcrew add <path>...   # seed workspace trust + register (one deliberate step)
 groundcrew remove <path>   # unregister; supervisor retires once its sessions go quiet
 groundcrew status          # fleet table: supervisors, versions, sessions, pulls, warnings
+groundcrew status --json   # the same headline fields, one object per repo
 groundcrew clean <repo>    # interactively delete spawned worktrees; shows dirty files
                            # AND unmerged commits before asking
 groundcrew daemon          # the long-running process (service entry point)
