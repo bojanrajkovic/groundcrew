@@ -7,15 +7,16 @@ mobile app — and keeps the fleet fresh (git pulls, tool installs, Claude Code
 upgrades) without ever losing an in-flight session.
 
 ```
-groundcrew add <path>...   # seed workspace trust + register (one deliberate step)
-groundcrew remove <path>   # unregister; supervisor retires once its sessions go quiet
-groundcrew status          # fleet table: supervisors, versions, sessions, pulls, warnings
-groundcrew status --json   # the same headline fields, one object per repo
-groundcrew sessions        # live sessions: repo, worktree, address, branch, title
-groundcrew sessions --json # the same rows, plus session id and pid
-groundcrew clean <repo>    # interactively delete spawned worktrees; shows dirty files
-                           # AND unmerged commits before asking
-groundcrew daemon          # the long-running process (service entry point)
+groundcrew add <path>...         # seed workspace trust + register (one deliberate step)
+groundcrew remove <path>         # unregister; supervisor retires once its sessions go quiet
+groundcrew status                # fleet table: supervisors, versions, sessions, pulls, warnings
+groundcrew status --json         # the same headline fields, one object per repo
+groundcrew sessions              # live sessions: repo, worktree, address, branch, title
+groundcrew sessions --json       # the same rows, plus session id and pid
+groundcrew clean <repo>          # interactively delete spawned worktrees; shows dirty files
+                                  # AND unmerged commits before asking
+groundcrew skills finding-peers  # print the ListAgents-peer-resolution guide
+groundcrew daemon                # the long-running process (service entry point)
 ```
 
 The registry is `~/.config/groundcrew/repos.toml`, maintained by
