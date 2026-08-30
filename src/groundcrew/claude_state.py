@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -112,6 +113,7 @@ class SessionInfo:
     version: str | None
     entrypoint: str | None = None  # "sdk-cli" for remote-control engines
     bridge_session_id: str | None = None  # "session_…" only for bridge-owned engines
+    address: str | None = None  # the name ListAgents shows for this peer
 
 
 def live_sessions() -> list[SessionInfo]:
@@ -141,6 +143,7 @@ def live_sessions() -> list[SessionInfo]:
         version = data.get("version")
         entrypoint = data.get("entrypoint")
         bridge = data.get("bridgeSessionId")
+        address = data.get("name")
         out.append(
             SessionInfo(
                 pid=pid,
@@ -150,6 +153,7 @@ def live_sessions() -> list[SessionInfo]:
                 version=version if isinstance(version, str) else None,
                 entrypoint=entrypoint if isinstance(entrypoint, str) else None,
                 bridge_session_id=bridge if isinstance(bridge, str) else None,
+                address=address if isinstance(address, str) else None,
             )
         )
     return out
@@ -216,6 +220,42 @@ def has_turns(session: SessionInfo) -> bool:
         except OSError:
             continue
     return False
+
+
+def session_title(session: SessionInfo) -> str | None:
+    """The session's current display title, set by /rename or Claude's own auto-titling.
+
+    Best-effort: most sessions never get one, so absence isn't a failure. Only an
+    I/O error or a recognized-but-malformed custom-title event get a warning —
+    the latter is the cheap signal that Claude Code changed this format.
+    """
+    title: str | None = None
+    for transcript in claude_home().glob(f"projects/*/{session.session_id}.jsonl"):
+        try:
+            text = transcript.read_text(errors="replace")
+        except OSError as exc:
+            print(
+                f"warning: session {session.session_id}: reading {transcript}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        for line in text.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") != "custom-title":
+                continue
+            custom_title = event.get("customTitle")
+            if isinstance(custom_title, str):
+                title = custom_title
+            else:
+                print(
+                    f"warning: session {session.session_id}: "
+                    f"custom-title event has no string customTitle: {event!r}",
+                    file=sys.stderr,
+                )
+    return title
 
 
 def session_quiet(session: SessionInfo, quiet_seconds: float, now: float) -> bool:

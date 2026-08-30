@@ -6,6 +6,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
 from conftest import write_session
 
 from groundcrew import claude_state
@@ -63,6 +64,36 @@ def test_live_sessions_skips_dead_and_recycled_pids(sandbox: Path) -> None:
 
     # once the child is dead, its session file no longer counts as live
     assert claude_state.live_sessions() == []
+
+
+def test_live_sessions_parses_the_address_claude_shows_in_listagents(sandbox: Path) -> None:
+    child = subprocess.Popen(["sleep", "30"])
+    try:
+        write_session(
+            child.pid,
+            "sess-1",
+            "/repo",
+            int(time.time() * 1000),
+            name="bridge-cse-01ejvlck93f3pwypqnygkmlu-bc",
+        )
+        sessions = claude_state.live_sessions()
+    finally:
+        child.kill()
+        child.wait()
+
+    assert sessions[0].address == "bridge-cse-01ejvlck93f3pwypqnygkmlu-bc"
+
+
+def test_live_sessions_address_is_none_when_absent(sandbox: Path) -> None:
+    child = subprocess.Popen(["sleep", "30"])
+    try:
+        write_session(child.pid, "sess-1", "/repo", int(time.time() * 1000))
+        sessions = claude_state.live_sessions()
+    finally:
+        child.kill()
+        child.wait()
+
+    assert sessions[0].address is None
 
 
 def engine(pid: int, sid: str, cwd: Path) -> claude_state.SessionInfo:
@@ -135,6 +166,40 @@ def transcript_for(session_id: str, *lines: str) -> Path:
     path = transcripts / f"{session_id}.jsonl"
     path.write_text("\n".join(lines) + "\n")
     return path
+
+
+def test_session_title_returns_the_last_custom_title(sandbox: Path) -> None:
+    transcript_for(
+        "sess-1",
+        json.dumps({"type": "custom-title", "customTitle": "first", "sessionId": "sess-1"}),
+        json.dumps({"type": "other-event"}),
+        json.dumps({"type": "custom-title", "customTitle": "second", "sessionId": "sess-1"}),
+    )
+    session = claude_state.SessionInfo(1, "sess-1", Path("/repo"), started_at=0, version=None)
+
+    assert claude_state.session_title(session) == "second"
+
+
+def test_session_title_is_none_when_never_set(
+    sandbox: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    transcript_for("sess-1", json.dumps({"type": "other-event"}))
+    session = claude_state.SessionInfo(1, "sess-1", Path("/repo"), started_at=0, version=None)
+
+    assert claude_state.session_title(session) is None
+    assert capsys.readouterr().err == ""  # absence is not a failure; no warning
+
+
+def test_session_title_warns_on_a_malformed_custom_title_event(
+    sandbox: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    transcript_for(
+        "sess-1", json.dumps({"type": "custom-title", "sessionId": "sess-1"})
+    )  # no customTitle key
+    session = claude_state.SessionInfo(1, "sess-1", Path("/repo"), started_at=0, version=None)
+
+    assert claude_state.session_title(session) is None
+    assert "sess-1" in capsys.readouterr().err
 
 
 def test_an_unused_anchor_session_has_had_no_turns(sandbox: Path) -> None:
