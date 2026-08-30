@@ -262,3 +262,25 @@ def test_sessions_table_shows_worktree_name_and_address(
     assert "bridge-cse_test" in out
     assert "bridge-cse-session_x-x1" in out
     assert "worktree-bridge-cse_test" in out
+
+
+def test_sessions_table_columns_stay_aligned_past_a_long_address(
+    sandbox: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo1 = make_repo(sandbox / "projects" / "one", branch="main")
+    repo2 = make_repo(sandbox / "projects" / "two", branch="main")
+    write_state({str(repo1): repo_state(), str(repo2): repo_state()})
+    c1 = live_engine(repo1, bridge_session_id="a")
+    c2 = live_engine(repo2, bridge_session_id="x" * 50)  # far past the old fixed 38-char column
+    try:
+        assert cli.cmd_sessions(config.load(), as_json=False) == 0
+    finally:
+        for child in (c1, c2):
+            child.kill()
+            child.wait()
+
+    lines = [
+        line for line in capsys.readouterr().out.splitlines() if line.startswith(("one", "two"))
+    ]
+    assert len(lines) == 2
+    assert lines[0].index(" main") == lines[1].index(" main")

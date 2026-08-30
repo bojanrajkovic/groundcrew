@@ -279,6 +279,17 @@ def _session_rows(state: FleetState, sessions: list[claude_state.SessionInfo]) -
     return rows
 
 
+def _session_cols(row: SessionRow, root: str) -> list[str]:
+    wt_name = Path(row.worktree).name if row.worktree else "-"
+    return [
+        row.repo.removeprefix(root),
+        wt_name,
+        row.address or "-",
+        row.branch or "-",
+        row.title or "",
+    ]
+
+
 def cmd_sessions(cfg: Config, *, as_json: bool = False) -> int:
     state_path = state_dir() / "state.json"
     if not state_path.exists():
@@ -300,13 +311,12 @@ def cmd_sessions(cfg: Config, *, as_json: bool = False) -> int:
         print("no live sessions")
         return 0
     root = str(cfg.root) + "/"
-    print(f"{'REPO':<34} {'WORKTREE':<38} {'ADDRESS':<38} {'BRANCH':<20} TITLE")
-    for row in rows:
-        wt_name = Path(row.worktree).name if row.worktree else "-"
-        print(
-            f"{row.repo.removeprefix(root):<34} {wt_name:<38} "
-            f"{row.address or '-':<38} {row.branch or '-':<20} {row.title or ''}"
-        )
+    headers = ["REPO", "WORKTREE", "ADDRESS", "BRANCH", "TITLE"]
+    table_rows = [_session_cols(row, root) for row in rows]
+    widths = _column_widths(headers, table_rows)
+    print(_fmt_row(headers, widths))
+    for cols in table_rows:
+        print(_fmt_row(cols, widths))
     return 0
 
 
