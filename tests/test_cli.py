@@ -139,3 +139,19 @@ def test_status_table_output_is_unchanged_by_the_json_refactor(
 def test_ago_clamps_a_future_timestamp_instead_of_going_negative() -> None:
     now = time.time()
     assert cli._ago(now + 120, now) == "0m ago"
+
+
+def test_status_table_columns_stay_aligned_past_a_long_repo_name(
+    sandbox: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    short = sandbox / "projects" / "a"
+    long = sandbox / "projects" / ("b" * 60)  # far past the old fixed 34-char column
+    short.mkdir(parents=True)
+    long.mkdir(parents=True)
+    write_state({str(short): repo_state(), str(long): repo_state()})
+
+    assert cli.cmd_status(config.load()) == 0
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith(("a", "b"))]
+    assert len(lines) == 2
+    assert lines[0].index("DOWN") == lines[1].index("DOWN")

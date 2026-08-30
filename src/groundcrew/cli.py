@@ -115,6 +115,16 @@ def _ago(then: float, now: float) -> str:
     return f"{hours}h{minutes:02d}m ago" if hours else f"{minutes}m ago"
 
 
+def _column_widths(headers: list[str], rows: list[list[str]]) -> list[int]:
+    """Each column's width is its own longest value, so nothing overflows into the next one."""
+    return [max(len(col[i]) for col in [headers, *rows]) for i in range(len(headers))]
+
+
+def _fmt_row(cols: list[str], widths: list[int]) -> str:
+    """Pad every column but the last, which would only gain trailing whitespace from it."""
+    return " ".join([*(c.ljust(w) for c, w in zip(cols[:-1], widths[:-1], strict=True)), cols[-1]])
+
+
 class RepoRow(BaseModel):
     """One repo's headline fields — shared by the table and `--json`.
 
@@ -165,7 +175,7 @@ def _repo_row(
     )
 
 
-def _print_repo_row(row: RepoRow, warnings: list[str], root: str, now: float) -> None:
+def _status_cols(row: RepoRow, root: str, now: float) -> list[str]:
     if row.state == "up":
         sup = f"up {row.pid}"
     elif row.state == "backoff":
@@ -177,14 +187,16 @@ def _print_repo_row(row: RepoRow, warnings: list[str], root: str, now: float) ->
     else:
         sess = "0"
     pull = f"{row.last_pull_kind or '-'} {_ago(row.last_pull_at or 0, now)}"
-    name = row.path.removeprefix(root)
-    print(f"{name:<34} {sup:<10} {row.version or '?':<10} {sess:<12} {pull:<22}")
+    return [row.path.removeprefix(root), sup, row.version or "?", sess, pull]
+
+
+def _print_repo_annotations(repo_path: str, warnings: list[str], indent: int) -> None:
     for warning in warnings:
-        print(f"{'':<34} ⚠ {warning}")
-    for wt in gitops.spawned_worktrees(Path(row.path)):
+        print(f"{'':<{indent}} ⚠ {warning}")
+    for wt in gitops.spawned_worktrees(Path(repo_path)):
         if wt.dirty_files:
             print(
-                f"{'':<34} ● dirty worktree {wt.path.name}: "
+                f"{'':<{indent}} ● dirty worktree {wt.path.name}: "
                 f"{wt.dirty_files} file(s), {wt.age_days:.0f}d old"
             )
 
@@ -215,11 +227,14 @@ def cmd_status(cfg: Config, *, as_json: bool = False) -> int:
         print(f"last nightly update: {state.last_update_result}")
 
     root = str(cfg.root) + "/"
-    header = f"{'REPO':<34} {'SUP':<10} {'VER':<10} {'SESS':<12} {'LAST PULL':<22}"
+    headers = ["REPO", "SUP", "VER", "SESS", "LAST PULL"]
+    table_rows = [_status_cols(row, root, now) for row, _ in displays]
+    widths = _column_widths(headers, table_rows)
     print()
-    print(header)
-    for row, warnings in displays:
-        _print_repo_row(row, warnings, root, now)
+    print(_fmt_row(headers, widths))
+    for (row, warnings), cols in zip(displays, table_rows, strict=True):
+        print(_fmt_row(cols, widths))
+        _print_repo_annotations(row.path, warnings, widths[0])
 
     if state.unregistered:
         print()
