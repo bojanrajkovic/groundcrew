@@ -2,6 +2,9 @@
 Description=groundcrew — Claude Code remote-control fleet daemon
 After=network-online.target
 Wants=network-online.target
+# Optional: get notified when the service halts for good. Needs
+# groundcrew-failed.service installed alongside; see docs/install.md.
+#OnFailure=groundcrew-failed.service
 
 [Service]
 Type=simple
@@ -18,9 +21,6 @@ RestartSec=10
 # A broken config.toml exits EX_CONFIG (78): halt and wait for a human instead
 # of fighting Restart=on-failure every 10 seconds over the same typo.
 RestartPreventExitStatus=78
-# Optional: get notified when the service halts for good. Needs
-# groundcrew-failed.service installed alongside; see docs/install.md.
-#OnFailure=groundcrew-failed.service
 # The nightly `claude update` can block up to 600s; without this, a stop during
 # it would SIGKILL the daemon before its final state write.
 TimeoutStopSec=650
