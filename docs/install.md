@@ -74,6 +74,26 @@ a live supervisor holds the file open and renaming it would leave that process
 writing where no reader can follow; the nightly `claude update` restarts the
 fleet on version drift, which is what gives the check its cadence.
 
+### Get alerted when the daemon halts
+
+A config error exits the daemon with status 78, and the unit deliberately does
+not restart it. Nothing supervises the fleet until you fix the file and restart
+the service, and the daemon is dead, so it can't send its own notification.
+Systemd can: `OnFailure=` starts another unit once the service gives up.
+
+```sh
+cp systemd/groundcrew-failed.service ~/.config/systemd/user/
+# edit ExecStart in that file to point at your notifier
+sed -i 's/^#OnFailure=/OnFailure=/' ~/.config/systemd/user/groundcrew.service
+systemctl --user daemon-reload
+```
+
+The helper sends your notifier a title and the last three journal lines, which
+usually include the key that failed validation. It names the notifier itself
+instead of reading `[notify].command`, because a broken `config.toml` is the
+likeliest reason the daemon halted. A crash that systemd restarts on its own
+doesn't trigger it.
+
 ## macOS (launchd)
 
 Setup uses the two templates in `launchd/`: a LaunchAgent plist and a

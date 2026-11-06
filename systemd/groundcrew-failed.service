@@ -1,0 +1,16 @@
+[Unit]
+Description=groundcrew — alert that the daemon halted
+
+# Template. Runs once when groundcrew.service gives up (a config error exits 78
+# and is deliberately not restarted). Install it next to groundcrew.service and
+# enable the OnFailure= line there; see docs/install.md.
+#
+# This unit does not read config.toml, which is the file whose typo usually
+# caused the failure, so the notifier path is set here.
+
+[Service]
+Type=oneshot
+# Same file as groundcrew.service, so the notifier sees PUSHOVER_TOKEN etc.
+EnvironmentFile=-%h/.config/groundcrew/env
+# Notifier contract: argv[1] = title, argv[2] = message. Change the path.
+ExecStart=/bin/sh -c 'exec %h/.local/bin/notify-pushover "groundcrew stopped" "$(journalctl --user -u groundcrew -n 3 --no-pager -o cat)"'
