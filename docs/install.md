@@ -32,7 +32,19 @@ One-time host preparation:
 PUSHOVER_TOKEN=...   # read by contrib/notify-pushover, not by groundcrew
 PUSHOVER_USER=...
 # SSH_AUTH_SOCK=/run/user/1000/... if ssh-agent auth is needed for pulls
+# CLAUDE_CODE_ARTIFACT=1 to give sessions the Artifact tool
 ```
+
+Every session inherits this environment. systemd loads the file into the
+daemon, the daemon passes it to each supervisor, and each supervisor passes it
+to the headless `claude --print` child it runs for every session. Headless
+sessions leave the Artifact tool off unless `CLAUDE_CODE_ARTIFACT=1` is set,
+and the `enableArtifact` setting doesn't override that.
+
+A change takes a daemon restart, and reaches a repo only when its supervisor
+is next spawned. Re-adopted supervisors keep the environment they started
+with, and an environment change isn't args-drift. The nightly `claude update`
+respawns the fleet whenever the version changes.
 
 ### Reading the logs
 
