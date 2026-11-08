@@ -53,6 +53,51 @@ def test_parked_branch_updates_ref_without_touching_tree(tmp_path: Path) -> None
     assert not (repo / "new.txt").exists()  # working tree untouched
 
 
+def test_renamed_branch_tracking_origin_default_is_pulled(tmp_path: Path) -> None:
+    origin = make_repo(tmp_path / "origin")
+    repo = clone(origin, tmp_path / "repo")
+    git(repo, "checkout", "-qb", "fork-main", "--track", "origin/main")
+    add_origin_commit(origin)
+
+    outcome = gitops.pull(repo)
+
+    assert outcome.kind is PullKind.FF_PULLED
+    assert outcome.moved
+    assert not outcome.parked
+    assert (repo / "new.txt").exists()
+
+
+def test_default_named_branch_tracking_another_remote_is_parked(tmp_path: Path) -> None:
+    origin = make_repo(tmp_path / "origin")
+    other = clone(origin, tmp_path / "other")
+    repo = clone(origin, tmp_path / "repo")
+    git(repo, "remote", "add", "upstream", str(other))
+    git(repo, "fetch", "-q", "upstream")
+    git(repo, "branch", "-q", "-u", "upstream/main")
+    add_origin_commit(origin)
+
+    outcome = gitops.pull(repo)
+
+    assert outcome.kind is PullKind.FETCHED
+    assert not outcome.moved
+    assert outcome.parked
+    assert not (repo / "new.txt").exists()  # working tree untouched
+    assert git(repo, "rev-parse", "origin/main").stdout == git(origin, "rev-parse", "main").stdout
+
+
+def test_default_named_branch_without_upstream_is_parked(tmp_path: Path) -> None:
+    origin = make_repo(tmp_path / "origin")
+    repo = clone(origin, tmp_path / "repo")
+    git(repo, "branch", "-q", "--unset-upstream")
+    add_origin_commit(origin)
+
+    outcome = gitops.pull(repo)
+
+    assert outcome.kind is PullKind.FETCHED
+    assert outcome.parked
+    assert not (repo / "new.txt").exists()
+
+
 def test_dirty_default_branch_fetches_and_warns(tmp_path: Path) -> None:
     origin = make_repo(tmp_path / "origin")
     repo = clone(origin, tmp_path / "repo")

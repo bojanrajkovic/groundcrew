@@ -564,7 +564,7 @@ class SupervisedRepo:
         self.last_pull_detail = outcome.detail
         if outcome.parked:
             self.warnings[WarningKind.PARKED] = (
-                "parked: checkout is not on the default branch; spawns base on HEAD"
+                "parked: HEAD does not track origin's default branch; spawns base on HEAD"
             )
         if outcome.kind is PullKind.FETCHED_DIRTY:
             self.warnings[WarningKind.DIRTY] = f"dirty: {outcome.detail}"
