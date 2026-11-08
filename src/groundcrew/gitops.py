@@ -2,11 +2,15 @@
 
 Pull policy (per repo, per tick):
 - not a git repository                         -> nothing to pull
-- checked out on the default branch and clean  -> `git pull --ff-only`
-- checked out elsewhere                        -> `git fetch origin <def>:<def>`
-  (updates the local default-branch ref without touching the working tree)
-- on the default branch but dirty              -> plain `git fetch` + a warning;
+- HEAD tracks origin/<def> and is clean   -> `git pull --ff-only`
+- HEAD tracks anything else ("parked")    -> `git fetch origin <def>:<def>`
+  (updates the local default-branch ref without touching the working tree),
+  or a plain `git fetch` when the local <def> is itself the parked HEAD
+- HEAD tracks origin/<def> but is dirty   -> plain `git fetch` + a warning;
   git refuses to move the checked-out branch under uncommitted work
+"On the default branch" means tracking origin/<def>, not being named <def>: a
+fork's `fork-main` tracking origin/main is on it, a `main` tracking another
+remote is not.
 "Dirty" means modified tracked files only — untracked files (like the
 `.claude/worktrees/` directory remote-control creates) never block or warn.
 """
@@ -68,6 +72,12 @@ def current_branch(repo: Path) -> str | None:
     return branch if result.returncode == 0 and branch else None
 
 
+def upstream(repo: Path) -> str | None:
+    """HEAD's upstream as `<remote>/<branch>`; None when detached or untracked."""
+    result = run_git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
 def has_remote(repo: Path) -> bool:
     result = run_git(repo, "remote")
     return result.returncode == 0 and bool(result.stdout.strip())
@@ -86,6 +96,7 @@ def branch_tip(repo: Path, branch: str) -> str | None:
 class PullKind(enum.Enum):
     FF_PULLED = "ff-pulled"
     REF_UPDATED = "ref-updated"
+    FETCHED = "fetched"  # parked on a local <def> that tracks elsewhere; no ref to move
     FETCHED_DIRTY = "fetched-dirty"
     NO_DEFAULT_BRANCH = "no-default-branch"
     NOT_A_REPO = "not-a-repo"  # a registered directory git does not manage
@@ -128,22 +139,29 @@ def pull(repo: Path) -> PullOutcome:
             parked=False,
         )
 
-    before = branch_tip(repo, branch)
     checked_out = current_branch(repo)
-    parked = checked_out != branch
+    parked = upstream(repo) != f"origin/{branch}"
+    # The ref that follows origin/<def>: HEAD's branch when it tracks it, else the local <def>.
+    tracked = checked_out if not parked and checked_out else branch
+    before = branch_tip(repo, tracked)
 
     if not parked and not dirty_tracked(repo):
         result = run_git(repo, "pull", "--ff-only", "--quiet")
         ok_kind = PullKind.FF_PULLED
         ok_detail = ""
-    elif parked:
+    elif parked and checked_out != branch:
         result = run_git(repo, "fetch", "origin", f"{branch}:{branch}")
         ok_kind = PullKind.REF_UPDATED
+        ok_detail = ""
+    elif parked:
+        # git refuses to fetch into the checked-out branch.
+        result = run_git(repo, "fetch", "origin", "--quiet")
+        ok_kind = PullKind.FETCHED
         ok_detail = ""
     else:
         result = run_git(repo, "fetch", "origin", "--quiet")
         ok_kind = PullKind.FETCHED_DIRTY
-        ok_detail = f"uncommitted work on {branch}; local ref not advanced"
+        ok_detail = f"uncommitted work on {checked_out}; local ref not advanced"
 
     if result.returncode == 0:
         kind, detail = ok_kind, ok_detail
@@ -152,7 +170,7 @@ def pull(repo: Path) -> PullOutcome:
     else:
         kind, detail = PullKind.FAILED, summarize(result.stderr)
 
-    after = branch_tip(repo, branch)
+    after = branch_tip(repo, tracked)
     return PullOutcome(kind, detail, moved=before != after, parked=parked)
 
 

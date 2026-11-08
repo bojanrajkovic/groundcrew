@@ -83,10 +83,13 @@ an anchor session in the repo root for the supervisor's whole life, so deferring
 to its mere presence would stop the fleet pulling at all. A root session blocks
 the pull only while it is not quiet, by the same measure drift restarts use.
 
-Pull policy: on the default branch and clean → `git pull --ff-only`; parked on
-another branch → `git fetch origin <default>:<default>` (updates the ref,
-never touches the working tree); on the default branch but dirty → fetch only,
-plus a status warning. Only modified *tracked* files count as dirty. A diverged local
+Pull policy: HEAD tracks `origin/<default>` and is clean → `git pull
+--ff-only`; parked (HEAD tracks anything else, or nothing) → `git fetch origin
+<default>:<default>` (updates the ref, never touches the working tree), or a
+plain fetch when the local `<default>` is itself the parked HEAD; HEAD tracks
+`origin/<default>` but is dirty → fetch only, plus a status warning. The check
+uses the upstream, not the branch name, so a fork's `fork-main` tracking
+`origin/main` pulls normally, and a `main` tracking another remote is parked. Only modified *tracked* files count as dirty. A diverged local
 default branch is classified as `diverged` — a warning for a human, not an
 infrastructure failure, so it never triggers the consecutive-failure alert. A
 registered directory git does not manage reports `not-a-repo` and is never
@@ -105,8 +108,8 @@ CLI's platform-specific `procStart` value.
 ## Known limits
 
 - Worktree sessions spawn from the repo's current HEAD, not the default
-  branch — keep repos parked on their default branch; `status` warns when one
-  isn't.
+  branch — keep each repo's HEAD tracking `origin/<default>`; `status` warns
+  when one doesn't.
 - A session running a *foreground* tool for longer than the quiet window can
   still be mistaken for idle and restarted, losing that turn's remaining work.
   Backgrounded runs are covered: an unfinished task id in the transcript keeps
